@@ -1,0 +1,14 @@
+{
+  "build": "pip install -r requirements.txt",
+  "start": "python daily_report.py",
+  "cron": [
+    {
+      "schedule": "25 6 * * *",
+      "command": "python daily_report.py"
+    },
+    {
+      "schedule": "*/10 * * * *",
+      "command": "python urgent_watcher.py"
+    }
+  ]
+}

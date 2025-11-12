@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="de">
+<meta charset="utf-8">
+<title>Kaufland Media & Review Briefing – {{ date_de }}</title>
+<body style="font-family:Arial,Helvetica,sans-serif;background:#f4f5f7;padding:24px;">
+  <table width="720" align="center" cellpadding="0" cellspacing="0" style="max-width:100%;background:#fff;border-radius:12px;overflow:hidden;">
+    <tr><td style="background:#E60000;color:#fff;padding:20px 24px;">
+      <table width="100%"><tr>
+        <td>
+          <div style="font-size:12px;letter-spacing:0.6px;text-transform:uppercase;color:#ffe4e4">Kaufland</div>
+          <div style="font-size:24px;font-weight:700;">Media & Review Briefing</div>
+          <div style="font-size:13px;color:#ffe4e4">{{ date_de }} • Versand bis 07:30 Uhr</div>
+        </td>
+        <td style="text-align:right;font-size:12px;color:#ffe4e4;">Empfänger: {{ recipient }}</td>
+      </tr></table>
+    </td></tr>
+
+    <tr><td style="padding:24px;">
+      <h2 style="margin:0 0 8px 0;font-size:18px;">Executive Summary</h2>
+      <ol style="margin-top:8px;">
+        {% for es in executive_summary %}<li>{{ es }}</li>{% endfor %}
+      </ol>
+    </td></tr>
+
+    <tr><td style="padding:0 24px 8px 24px;"><h2 style="font-size:18px;margin:0">Media Coverage – Deutschland</h2></td></tr>
+    <tr><td style="padding:8px 24px;">
+      <div style="background:#F9FAFB;border:1px solid #E5E7EB;border-radius:10px;">
+        <div style="padding:14px 16px;font-weight:700;">Top Headlines (1–10)</div>
+        {% for i in top_headlines %}
+        <div style='padding:8px 16px;border-top:1px solid #E5E7EB;'>
+          <div><a href='{{ i.url }}' style='color:#E60000;font-weight:700;text-decoration:none'>{{ i.title }}</a></div>
+          <div style='color:#374151;margin-top:4px'>{{ i.summary }}</div>
+          <div style='font-size:12px;color:#6B7280;margin-top:4px'>Quelle: {{ i.source }} · Typ: {{ i.type }} · Einschätzung: {{ i.why }}</div>
+        </div>
+        {% endfor %}
+      </div>
+    </td></tr>
+    <tr><td style='padding:8px 24px;'>
+      <div style='background:#FFFFFF;border:1px solid #E5E7EB;border-radius:10px;'>
+        <div style='padding:14px 16px;font-weight:700;'>Regional Topics</div>
+        {% if regional_buckets %}
+          {% for region, items in regional_buckets.items() %}
+            <div style='padding:8px 16px;border-top:1px solid #E5E7EB;'><strong>{{ region }}</strong></div>
+            <ul style='margin:8px 0 16px 48px;'>
+              {% for i in items[:6] %}
+                <li><a href='{{ i.url }}' style='color:#E60000;text-decoration:none'>{{ i.title }}</a> <span style='color:#6B7280'>({{ i.source }}, {{ i.type }})</span></li>
+              {% endfor %}
+            </ul>
+          {% endfor %}
+        {% else %}
+          <div style='padding:8px 16px;color:#6B7280;'>Keine regionalen Zuordnungen erkannt (Konfiguration REGIONS_JSON prüfen).</div>
+        {% endif %}
+      </div>
+    </td></tr>
+
+
+    {% if other_items %}
+    <tr><td style='padding:8px 24px;'>
+      <div style='background:#FFFFFF;border:1px solid #E5E7EB;border-radius:10px;'>
+        <div style='padding:14px 16px;font-weight:700;'>Weitere relevante Erwähnungen</div>
+        <ul style='margin:8px 0 16px 32px;'>
+          {% for o in other_items %}
+          <li><a href='{{ o.url }}' style='color:#E60000;text-decoration:none'>{{ o.title }}</a> <span style='color:#6B7280'>({{ o.source }}, {{ o.type }})</span></li>
+          {% endfor %}
+        </ul>
+      </div>
+    </td></tr>
+    {% endif %}
+
+    <tr><td style='padding:8px 24px;'>
+      <div style='background:#F9FAFB;border:1px solid #E5E7EB;border-radius:10px;'>
+        <div style='padding:14px 16px;font-weight:700;'>Google Reviews – Highlights</div>
+        <div style='padding:8px 16px;border-top:1px solid #E5E7EB;color:#6B7280;'>Keine verlässlichen 24h-Ausschläge identifiziert (Pilot). Live-Tracking im Produktivmodus.</div>
+      </div>
+    </td></tr>
+
+    <tr><td style='padding:8px 24px;'>
+      <div style='background:#FEF2F2;border:1px solid #FECACA;border-radius:10px;'>
+        <div style='padding:14px 16px;font-weight:700;color:#991B1B'>Sensations & Narratives</div>
+        <ul style='margin:8px 0 16px 32px;color:#7F1D1D;'>
+          <li>Boulevard-/virale Themen werden transparent gelistet (Kontext: Stimmung, nicht Faktentreue).</li>
+        </ul>
+        <div style='padding:0 16px 14px 16px;font-size:12px;color:#7F1D1D'>Hinweis: Inhalte können übertrieben oder unbestätigt sein, prägen jedoch die öffentliche Debatte.</div>
+      </div>
+    </td></tr>
+
+    <tr><td style='padding:8px 24px 16px 24px;'>
+      <div style='background:#FFFFFF;border:1px solid #E5E7EB;border-radius:10px;'>
+        <div style='padding:14px 16px;font-weight:700;'>International Highlights</div>
+        <ul style='margin:8px 0 16px 32px;'>
+          <li>Relevante/virale Fälle aus CZ/PL/SK mit kurzem DE-Summary.</li>
+        </ul>
+      </div>
+    </td></tr>
+
+    <tr><td align='center' style='padding:8px 24px 24px 24px;'>
+      <a href='{{ full_report_filename }}' style='background:#E60000;border:1px solid #E60000;border-radius:6px;color:#fff;display:inline-block;font-weight:700;line-height:44px;text-decoration:none;width:280px;'>Vollständigen Bericht anzeigen</a>
+    </td></tr>
+
+    <tr><td style='background:#E60000;color:#ffe4e4;padding:14px 24px;font-size:12px;'>Automatischer Versand an {{ recipient }} · {{ date_de }}<br>Bei dringenden Themen erfolgt ein Sofortalarm mit dem Betreff: „⚠️ Monitoring Kaufland erwähnt“.</td></tr>
+  </table>
+</body>
+</html>
