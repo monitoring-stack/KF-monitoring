@@ -340,7 +340,7 @@ Keine auffälligen 24h-Veränderungen (Pilotmodus). Aktivierbar via SerpAPI.
 </li>""".strip()
         )
 
-   # === 6) Dosazení do HTML šablony (bez .format, ruční replace) ===
+       # === 6) Dosazení do HTML šablony (bez .format, ruční replace) ===
     html = template_str
 
     replacements = {
@@ -359,6 +359,7 @@ Keine auffälligen 24h-Veränderungen (Pilotmodus). Aktivierbar via SerpAPI.
 
     for key, val in replacements.items():
         html = html.replace(key, val)
+
 
     # === PDF + odeslání ===
     pdf_name = f"full_report_{datetime.now().strftime('%Y-%m-%d')}.pdf"
