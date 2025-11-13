@@ -362,7 +362,7 @@ Keine auffälligen 24h-Veränderungen (Pilotmodus). Aktivierbar via SerpAPI.
 
 
     # === PDF + odeslání ===
-    pdf_name = f"full_report_{datetime.now().strftime('%Y-%m-%d')}.pdf"
+    pdf_name = f"DE_monitoring_privat_{datetime.now().strftime('%Y-%m-%d')}.pdf"
     build_pdf(pdf_name, items, intl, reviews)
 
     subject = f"📰 Kaufland Media & Review Briefing | {date_de(TIMEZONE)}"
