@@ -1,103 +1,159 @@
 <!doctype html>
 <html lang="de">
+<head>
 <meta charset="utf-8">
-<title>Kaufland Media & Review Briefing – {{ date_de }}</title>
-<body style="font-family:Arial,Helvetica,sans-serif;background:#f4f5f7;padding:24px;">
-  <table width="720" align="center" cellpadding="0" cellspacing="0" style="max-width:100%;background:#fff;border-radius:12px;overflow:hidden;">
-    <tr><td style="background:#E60000;color:#fff;padding:20px 24px;">
-      <table width="100%"><tr>
-        <td>
-          <div style="font-size:12px;letter-spacing:0.6px;text-transform:uppercase;color:#ffe4e4">Kaufland</div>
-          <div style="font-size:24px;font-weight:700;">Media & Review Briefing</div>
-          <div style="font-size:13px;color:#ffe4e4">{{ date_de }} • Versand bis 07:30 Uhr</div>
-        </td>
-        <td style="text-align:right;font-size:12px;color:#ffe4e4;">Empfänger: {{ recipient }}</td>
-      </tr></table>
-    </td></tr>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kaufland Media & Review Briefing</title>
 
-    <tr><td style="padding:24px;">
-      <h2 style="margin:0 0 8px 0;font-size:18px;">Executive Summary</h2>
-      <ol style="margin-top:8px;">
-        {% for es in executive_summary %}<li>{{ es }}</li>{% endfor %}
-      </ol>
-    </td></tr>
+<style>
+  :root{
+    --kf-red:#E3000F;       /* Kaufland red */
+    --kf-dk:#1F1F1F;
+    --kf-txt:#2B2B2B;
+    --kf-gray:#F4F5F7;
+    --kf-mid:#8A8F98;
+  }
 
-    <tr><td style="padding:0 24px 8px 24px;"><h2 style="font-size:18px;margin:0">Media Coverage – Deutschland</h2></td></tr>
-    <tr><td style="padding:8px 24px;">
-      <div style="background:#F9FAFB;border:1px solid #E5E7EB;border-radius:10px;">
-        <div style="padding:14px 16px;font-weight:700;">Top Headlines (1–10)</div>
-        {% for i in top_headlines %}
-        <div style='padding:8px 16px;border-top:1px solid #E5E7EB;'>
-          <div><a href='{{ i.url }}' style='color:#E60000;font-weight:700;text-decoration:none'>{{ i.title }}</a></div>
-          <div style='color:#374151;margin-top:4px'>{{ i.summary }}</div>
-          <div style='font-size:12px;color:#6B7280;margin-top:4px'>Quelle: {{ i.source }} · Typ: {{ i.type }} · Einschätzung: {{ i.why }}</div>
+  /* Email/PDF-safe base */
+  html,body{margin:0;padding:0;background:#fff;color:var(--kf-txt);font:15px/1.55 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;}
+  a{color:#0057D9;text-decoration:none;}
+  a:hover{text-decoration:underline;}
+  img{max-width:100%;height:auto;border:0;}
+
+  /* Container */
+  .wrap{max-width:860px;margin:0 auto;padding:28px 22px 40px;}
+  .card{background:#fff;border:1px solid #EDEFF2;border-radius:12px;overflow:hidden;margin:18px 0;}
+  .card-header{padding:18px 20px;border-bottom:1px solid #EEE;background:linear-gradient(180deg,#fff 0,#fafafa 100%);}
+  .card-body{padding:18px 20px;}
+  .muted{color:var(--kf-mid);}
+
+  /* Header */
+  .brand{display:flex;align-items:center;gap:14px;margin-bottom:18px;}
+  .logo{width:40px;height:40px;border:2px solid var(--kf-red);border-radius:6px;display:grid;place-items:center;font-weight:800;color:var(--kf-red);}
+  .title{font-size:20px;font-weight:700;color:var(--kf-dk);line-height:1.2;}
+  .subtitle{font-size:13px;color:var(--kf-mid);}
+
+  /* Section titles */
+  h2{margin:0 0 10px;font-size:16px;color:var(--kf-dk);}
+  .pill{display:inline-block;font-size:12px;color:#fff;background:var(--kf-red);padding:2px 8px;border-radius:999px;margin-left:8px;vertical-align:1px;}
+
+  /* Lists */
+  .list{list-style:none;margin:0;padding:0;}
+  .item{display:flex;gap:10px;padding:12px 0;border-bottom:1px solid #F0F1F3;}
+  .item:last-child{border-bottom:0;}
+  .rank{min-width:22px;height:22px;border-radius:6px;background:var(--kf-gray);color:#586070;font-weight:700;display:grid;place-items:center;}
+  .item a{font-weight:600;color:var(--kf-dk);}
+  .meta{font-size:12px;color:var(--kf-mid);margin-top:4px;}
+
+  /* Reviews table */
+  table{width:100%;border-collapse:collapse;}
+  th,td{padding:10px 8px;border-bottom:1px solid #ECEFF3;text-align:left;}
+  th{font-size:12px;color:#6B7280;background:#FBFBFC;}
+  .pos{color:#0F8C3A;font-weight:600;}
+  .neg{color:#D92D20;font-weight:600;}
+
+  /* Alerts/bulvár sekce */
+  .alert{border-left:4px solid #D92D20;background:#FFF4F2;padding:12px 14px;border-radius:8px;margin:10px 0;}
+  .rumor{border-left:4px solid #FDB022;background:#FFFAEB;padding:12px 14px;border-radius:8px;margin:10px 0;}
+
+  /* Footer + print */
+  .footer{margin-top:24px;font-size:12px;color:var(--kf-mid);}
+  @media print{
+    .wrap{padding:10mm;}
+    .card{page-break-inside:avoid;}
+    .page-break{page-break-before:always;}
+    a{color:#000;text-decoration:underline;}
+  }
+</style>
+</head>
+<body>
+  <div class="wrap">
+
+    <!-- HEADER -->
+    <div class="brand">
+      <div class="logo">K</div>
+      <div>
+        <div class="title">Kaufland Media & Review Briefing</div>
+        <div class="subtitle">
+          {date_str} · Zeitzone {tz} · Empfänger: {recipient}
         </div>
-        {% endfor %}
       </div>
-    </td></tr>
-    <tr><td style='padding:8px 24px;'>
-      <div style='background:#FFFFFF;border:1px solid #E5E7EB;border-radius:10px;'>
-        <div style='padding:14px 16px;font-weight:700;'>Regional Topics</div>
-        {% if regional_buckets %}
-          {% for region, items in regional_buckets.items() %}
-            <div style='padding:8px 16px;border-top:1px solid #E5E7EB;'><strong>{{ region }}</strong></div>
-            <ul style='margin:8px 0 16px 48px;'>
-              {% for i in items[:6] %}
-                <li><a href='{{ i.url }}' style='color:#E60000;text-decoration:none'>{{ i.title }}</a> <span style='color:#6B7280'>({{ i.source }}, {{ i.type }})</span></li>
-              {% endfor %}
-            </ul>
-          {% endfor %}
-        {% else %}
-          <div style='padding:8px 16px;color:#6B7280;'>Keine regionalen Zuordnungen erkannt (Konfiguration REGIONS_JSON prüfen).</div>
-        {% endif %}
+    </div>
+
+    <!-- SUMMARY CARD -->
+    <div class="card">
+      <div class="card-header">
+        <h2>Executive Summary</h2>
       </div>
-    </td></tr>
-
-
-    {% if other_items %}
-    <tr><td style='padding:8px 24px;'>
-      <div style='background:#FFFFFF;border:1px solid #E5E7EB;border-radius:10px;'>
-        <div style='padding:14px 16px;font-weight:700;'>Weitere relevante Erwähnungen</div>
-        <ul style='margin:8px 0 16px 32px;'>
-          {% for o in other_items %}
-          <li><a href='{{ o.url }}' style='color:#E60000;text-decoration:none'>{{ o.title }}</a> <span style='color:#6B7280'>({{ o.source }}, {{ o.type }})</span></li>
-          {% endfor %}
-        </ul>
+      <div class="card-body">
+        <div>{executive_summary_html}</div>
+        <div class="muted" style="margin-top:8px;">
+          Quellen: Offizielle Medien, Google Reviews (DE), Social Listening & News-RSS.
+        </div>
       </div>
-    </td></tr>
-    {% endif %}
+    </div>
 
-    <tr><td style='padding:8px 24px;'>
-      <div style='background:#F9FAFB;border:1px solid #E5E7EB;border-radius:10px;'>
-        <div style='padding:14px 16px;font-weight:700;'>Google Reviews – Highlights</div>
-        <div style='padding:8px 16px;border-top:1px solid #E5E7EB;color:#6B7280;'>Keine verlässlichen 24h-Ausschläge identifiziert (Pilot). Live-Tracking im Produktivmodus.</div>
+    <!-- TOP HEADLINES -->
+    <div class="card">
+      <div class="card-header">
+        <h2>Top Schlagzeilen <span class="pill">{top_count}</span></h2>
       </div>
-    </td></tr>
-
-    <tr><td style='padding:8px 24px;'>
-      <div style='background:#FEF2F2;border:1px solid #FECACA;border-radius:10px;'>
-        <div style='padding:14px 16px;font-weight:700;color:#991B1B'>Sensations & Narratives</div>
-        <ul style='margin:8px 0 16px 32px;color:#7F1D1D;'>
-          <li>Boulevard-/virale Themen werden transparent gelistet (Kontext: Stimmung, nicht Faktentreue).</li>
-        </ul>
-        <div style='padding:0 16px 14px 16px;font-size:12px;color:#7F1D1D'>Hinweis: Inhalte können übertrieben oder unbestätigt sein, prägen jedoch die öffentliche Debatte.</div>
+      <div class="card-body">
+        <ol class="list">
+          {top_headlines_html}
+        </ol>
       </div>
-    </td></tr>
+    </div>
 
-    <tr><td style='padding:8px 24px 16px 24px;'>
-      <div style='background:#FFFFFF;border:1px solid #E5E7EB;border-radius:10px;'>
-        <div style='padding:14px 16px;font-weight:700;'>International Highlights</div>
-        <ul style='margin:8px 0 16px 32px;'>
-          <li>Relevante/virale Fälle aus CZ/PL/SK mit kurzem DE-Summary.</li>
-        </ul>
+    <!-- GOOGLE REVIEWS (DE) -->
+    <div class="card">
+      <div class="card-header">
+        <h2>Google Reviews – Deutschland</h2>
       </div>
-    </td></tr>
+      <div class="card-body">
+        <table>
+          <thead>
+            <tr>
+              <th>Region / Filiale</th>
+              <th>Ø Bewertung</th>
+              <th>Δ 24h</th>
+              <th>Reviews 24h</th>
+              <th>Auffälligkeiten</th>
+            </tr>
+          </thead>
+          <tbody>
+            {reviews_table_rows_html}
+          </tbody>
+        </table>
+        <div class="muted" style="margin-top:8px">{reviews_note}</div>
+      </div>
+    </div>
 
-    <tr><td align='center' style='padding:8px 24px 24px 24px;'>
-      <a href='{{ full_report_filename }}' style='background:#E60000;border:1px solid #E60000;border-radius:6px;color:#fff;display:inline-block;font-weight:700;line-height:44px;text-decoration:none;width:280px;'>Vollständigen Bericht anzeigen</a>
-    </td></tr>
+    <!-- URGENT ALERTS -->
+    {urgent_block_html}
 
-    <tr><td style='background:#E60000;color:#ffe4e4;padding:14px 24px;font-size:12px;'>Automatischer Versand an {{ recipient }} · {{ date_de }}<br>Bei dringenden Themen erfolgt ein Sofortalarm mit dem Betreff: „⚠️ Monitoring Kaufland erwähnt“.</td></tr>
-  </table>
+    <!-- BOULEVARD / RUMORS -->
+    {rumors_block_html}
+
+    <!-- INTERNATIONAL VIRALS -->
+    <div class="card page-break">
+      <div class="card-header">
+        <h2>International – Virale Erwähnungen</h2>
+      </div>
+      <div class="card-body">
+        <ol class="list">
+          {international_html}
+        </ol>
+        <div class="muted" style="margin-top:8px">
+          Nur zur Einordnung (keine unmittelbare Relevanz für DE). Kurze Zusammenfassung in DE ist jeweils beigefügt.
+        </div>
+      </div>
+    </div>
+
+    <!-- FOOTER -->
+    <div class="footer">
+      Dieser Bericht ist automatisch generiert. Für Rückfragen / Korrekturen bitte direkt antworten.
+    </div>
+  </div>
 </body>
 </html>
