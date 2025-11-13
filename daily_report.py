@@ -168,13 +168,17 @@ def main():
     )
 
     # --- PDF + e-mail ---
-    pdf_name = f"full_report_{datetime.now().strftime('%Y-%m-%d')}.pdf"
+   pdf_name = f"full_report_{datetime.now().strftime('%Y-%m-%d')}.pdf"
     build_pdf(pdf_name, items, intl, reviews)
 
     subject = f"📰 Kaufland Media & Review Briefing | {date_de(TIMEZONE)}"
-    msg = build_email(SENDER, RECIPIENT, subject, html, attachments=[pdf_name], cc=CC, bcc=BCC)
-    send_via_gmail(msg, SENDER, APP_PWD)
 
-
+    # Poslat e-mail přes Resend (HTML + PDF jako příloha)
+    send_via_resend(
+        RECIPIENT,
+        subject,
+        html,
+        attachment_path=pdf_name,
+    )
 if __name__ == '__main__':
     main()
