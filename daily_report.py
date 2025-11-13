@@ -8,7 +8,7 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import mm
 
-from helpers import date_de, classify, build_email, send_via_gmail
+from helpers import date_de, classify, send_via_resend
 
 # ===== Config from env =====
 TIMEZONE   = os.getenv('TIMEZONE', 'Europe/Berlin')
