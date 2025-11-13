@@ -29,9 +29,9 @@ TIMEZONE = os.getenv("TIMEZONE", "Europe/Berlin")
 
 # Resend
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
-EMAIL_FROM = os.getenv("EMAIL_FROM")          # např. "Kaufland Monitoring <reports@tvoje-domena.resend.app>"
-EMAIL_TO = os.getenv("EMAIL_TO")              # hlavní příjemce
-CC = os.getenv("CC")                          # např. "a@b.de,c@d.de"
+EMAIL_FROM = os.getenv("EMAIL_FROM")
+EMAIL_TO = os.getenv("EMAIL_TO")
+CC = os.getenv("CC")
 BCC = os.getenv("BCC")
 
 MAX_TOP = int(os.getenv("MAX_TOP", "10"))
@@ -81,6 +81,7 @@ def fetch_news():
 
 
 def bucket_by_region(items, regions_json):
+    """Zatím nepoužíváme v e-mailu, ale nechávám pro budoucí regionální rozpad."""
     try:
         regions = json.loads(regions_json) if regions_json else {}
     except Exception:
@@ -111,8 +112,12 @@ def bucket_by_region(items, regions_json):
 # ================== PDF REPORT ==================
 
 
-def build_pdf(filename, items, intl, reviews):
+def build_pdf(filename, top_items, intl_items):
     styles = getSampleStyleSheet()
+    title_style = styles["Title"]
+    header_style = styles["Heading2"]
+    normal_style = styles["BodyText"]
+
     doc = SimpleDocTemplate(
         filename,
         pagesize=A4,
@@ -124,21 +129,32 @@ def build_pdf(filename, items, intl, reviews):
 
     story = []
 
+    # Titulek
     story.append(
-        Paragraph(f"Kaufland Full Report – {date_de(TIMEZONE)}", styles["Title"])
+        Paragraph(f"Kaufland Media & Review Briefing – {date_de(TIMEZONE)}", title_style)
     )
-    story.append(Spacer(1, 8))
+    story.append(Spacer(1, 10))
 
-    data = [["Titel", "Quelle", "Typ", "Kurzfassung", "Link"]]
+    # -------- Top Schlagzeilen (DE) --------
+    story.append(Paragraph("Top Schlagzeilen (DE)", header_style))
+    story.append(Spacer(1, 4))
 
-    for i in items:
-        data.append([i["title"], i["source"], i["type"], i["summary"], i["url"]])
+    top_data = [["#", "Titel", "Quelle", "Link"]]
+    for i, it in enumerate(top_items, start=1):
+        link_par = Paragraph(
+            f'<link href="{escape(it["url"])}">Link</link>', normal_style
+        )
+        top_data.append(
+            [
+                str(i),
+                escape(it["title"]),
+                escape(it.get("source", "")),
+                link_par,
+            ]
+        )
 
-    for x in intl:
-        data.append([x["title"], x["source"], "international", x["summary"], x["url"]])
-
-    tbl = Table(data, colWidths=[60 * mm, 30 * mm, 25 * mm, 55 * mm, 30 * mm])
-    tbl.setStyle(
+    top_tbl = Table(top_data, colWidths=[10 * mm, 80 * mm, 35 * mm, 45 * mm])
+    top_tbl.setStyle(
         TableStyle(
             [
                 ("BACKGROUND", (0, 0), (-1, 0), "#E60000"),
@@ -152,7 +168,44 @@ def build_pdf(filename, items, intl, reviews):
         )
     )
 
-    story.append(tbl)
+    story.append(top_tbl)
+    story.append(Spacer(1, 12))
+
+    # -------- International – Virale Erwähnungen --------
+    if intl_items:
+        story.append(Paragraph("International – Virale Erwähnungen", header_style))
+        story.append(Spacer(1, 4))
+
+        intl_data = [["#", "Titel", "Quelle", "Link"]]
+        for i, it in enumerate(intl_items, start=1):
+            link_par = Paragraph(
+                f'<link href="{escape(it["url"])}">Link</link>', normal_style
+            )
+            intl_data.append(
+                [
+                    str(i),
+                    escape(it["title"]),
+                    escape(it.get("source", "")),
+                    link_par,
+                ]
+            )
+
+        intl_tbl = Table(intl_data, colWidths=[10 * mm, 80 * mm, 35 * mm, 45 * mm])
+        intl_tbl.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), "#F2F2F2"),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, 0), 10),
+                    ("GRID", (0, 0), (-1, -1), 0.25, "grey"),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("FONTSIZE", (0, 1), (-1, -1), 9),
+                ]
+            )
+        )
+
+        story.append(intl_tbl)
+
     doc.build(story)
 
 
@@ -220,9 +273,14 @@ def send_via_resend(subject, html, pdf_name):
 
 def main():
     items = fetch_news()
+
+    # Top Schlagzeilen (DE) – prostě TOP N podle score
     top = items[:MAX_TOP]
-    others = items[MAX_TOP:50]
-    intl = [it for it in items if not it["source"].endswith(".de")][:5]
+
+    # International – jiná doména než .de + nepatří do Top Schlagzeilen
+    top_urls = {it["url"] for it in top}
+    intl_candidates = [it for it in items if not it["source"].endswith(".de")]
+    intl = [it for it in intl_candidates if it["url"] not in top_urls][:10]
 
     # TODO: napojit skutečná data z reviews, zatím prázdné
     reviews = []
@@ -231,17 +289,16 @@ def main():
     with open("email_template.html", "r", encoding="utf-8") as f:
         template_str = f.read()
 
-    # === 1) Executive summary ===
+    # -------- Executive Summary (německy) --------
     executive_summary_html = """
-<p><strong>Insight:</strong> Kurátorsky vybrané Top-Schlagzeilen (1–10); další zmínky níže.</p>
-<p><strong>Implikation:</strong> Přehled v jednom e-mailu; regionální rozdíly lze rychle dohledat.</p>
-<p><strong>Aktion:</strong> Sledujeme Google Reviews a posíláme ⚠️ Alerty při anomáliích.</p>
+<p><strong>Insight:</strong> Kuratierte Top-Schlagzeilen (1–10) aus Deutschland; weitere Erwähnungen unten.</p>
+<p><strong>Implikation:</strong> Relevante Entwicklungen rund um Kaufland in einem kompakten Überblick.</p>
+<p><strong>Aktion:</strong> Google Reviews und mediale Stimmung werden laufend beobachtet, Alerts bei Auffälligkeiten.</p>
 """.strip()
 
-    # === 2) Top headlines ===
-    top_items = top
+    # -------- Top headlines HTML --------
     top_items_html = []
-    for i, it in enumerate(top_items):
+    for i, it in enumerate(top, start=1):
         meta_parts = []
         if it.get("source"):
             meta_parts.append(escape(it["source"]))
@@ -254,7 +311,7 @@ def main():
         top_items_html.append(
             f"""
 <li class="item">
-  <div class="rank">{i+1}</div>
+  <div class="rank">{i}</div>
   <div>
     <a href="{it['url']}">{escape(it['title'])}</a>
     <div class="meta">{meta}</div>
@@ -262,9 +319,18 @@ def main():
 </li>""".strip()
         )
 
-    # === 3) Reviews tabulka (zatím placeholder) ===
+    # -------- Google Reviews tabulka --------
     review_rows = []
-    for r in (reviews or []):
+    # vezmeme jen případy, kde je něco „vidět“ – změna ratingu nebo nové recenze
+    significant_reviews = [
+        r for r in (reviews or []) if r.get("count_24h", 0) or r.get("delta")
+    ]
+    significant_reviews.sort(
+        key=lambda r: (abs(r.get("delta") or 0), r.get("count_24h", 0)), reverse=True
+    )
+    top_reviews = significant_reviews[:5]
+
+    for r in top_reviews:
         delta = r.get("delta")
         delta_class = "pos" if (delta is not None and delta >= 0) else "neg"
         review_rows.append(
@@ -287,7 +353,7 @@ Keine auffälligen 24h-Veränderungen (Pilotmodus). Aktivierbar via SerpAPI.
 
     reviews_note = "Δ = Veränderung der Ø-Bewertung in den letzten 24 Stunden."
 
-    # === 4) Urgent & Boulevard bloky – prozatím prázdné ===
+    # -------- Urgent & Rumors bloky (zatím prázdné, ale připravené) --------
     urgent_list = []
     rumors = []
 
@@ -319,7 +385,7 @@ Keine auffälligen 24h-Veränderungen (Pilotmodus). Aktivierbar via SerpAPI.
     else:
         rumors_block_html = ""
 
-    # === 5) International seznam ===
+    # -------- International HTML (bez překryvu s Top, krátký popis) --------
     international_items_html = []
     for it in (intl or []):
         meta_parts = []
@@ -329,6 +395,8 @@ Keine auffälligen 24h-Veränderungen (Pilotmodus). Aktivierbar via SerpAPI.
             meta_parts.append(escape(it["type"]))
         meta = " · ".join(meta_parts)
 
+        summary = escape(it.get("summary", ""))[:240]
+
         international_items_html.append(
             f"""
 <li class="item">
@@ -336,34 +404,32 @@ Keine auffälligen 24h-Veränderungen (Pilotmodus). Aktivierbar via SerpAPI.
   <div>
     <a href="{it['url']}">{escape(it['title'])}</a>
     <div class="meta">{meta}</div>
+    <div class="meta meta-secondary">{summary}</div>
   </div>
 </li>""".strip()
         )
 
-       # === 6) Dosazení do HTML šablony (bez .format, ruční replace) ===
+    # -------- Dosazení do HTML šablony --------
     html = template_str
-
     replacements = {
         "{date_str}": date_de(TIMEZONE),
         "{tz}": TIMEZONE,
         "{recipient}": EMAIL_TO or "",
         "{executive_summary_html}": executive_summary_html,
-        "{top_count}": str(len(top_items)),
+        "{top_count}": str(len(top)),
         "{top_headlines_html}": "\n".join(top_items_html),
         "{reviews_table_rows_html}": "\n".join(review_rows),
         "{reviews_note}": reviews_note,
         "{urgent_block_html}": urgent_block_html,
-        "{rumors_block_html}": rumors_block_html,
+        "{rumors_block_html}": "\n".join([rumors_block_html]),
         "{international_html}": "\n".join(international_items_html),
     }
-
     for key, val in replacements.items():
         html = html.replace(key, val)
 
-
-    # === PDF + odeslání ===
+    # -------- PDF + odeslání --------
     pdf_name = f"DE_monitoring_privat_{datetime.now().strftime('%Y-%m-%d')}.pdf"
-    build_pdf(pdf_name, items, intl, reviews)
+    build_pdf(pdf_name, top, intl)
 
     subject = f"📰 Kaufland Media & Review Briefing | {date_de(TIMEZONE)}"
     send_via_resend(subject, html, pdf_name)
