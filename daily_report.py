@@ -112,27 +112,94 @@ def main():
 
     reviews = []  # optional later via SerpAPI
 
-    template_str = open('email_template.html','r',encoding='utf-8').read()
-    from jinja2 import Template
-    regional = bucket_by_region(others, REGIONS_JSON)
-    html = Template(template_str).render(
-        date_de=date_de(TIMEZONE),
-        recipient=RECIPIENT,
-        executive_summary=[
-            "Top-Schlagzeilen kuratiert (1–10), weitere Erwähnungen unten.",
-            "Google Reviews: Pilotbetrieb/optional aktivierbar.",
-            "Sensations & Narratives separat gekennzeichnet."
-        ],
-        top_headlines=top,
-        other_items=others,
-        regional_buckets=regional,
-        reviews=reviews,
-        sensations=[
-            "Boulevard-/virale Themen werden transparent gelistet (Kontext: Stimmung, nicht Faktentreue)."
-        ],
-        intl_items=intl,
-        full_report_filename=f"full_report_{datetime.now().strftime('%Y-%m-%d')}.pdf"
-    )
+    # === RENDER NOVÉ ŠABLONY email_template.html (bez Jinja2) ===
+from html import escape
+
+template_str = open('email_template.html','r',encoding='utf-8').read()
+
+# 1) Executive summary – klidně uprav 3–5 vět
+executive_summary_html = """
+<p><strong>Insight:</strong> Kurátorsky vybrané Top-Schlagzeilen (1–10); další zmínky níže.</p>
+<p><strong>Implikation:</strong> Přehled v jednom e-mailu; regionální rozdíly lze rychle dohledat.</p>
+<p><strong>Aktion:</strong> Sledujeme Google Reviews a posíláme ⚠️ alerty při anomáliích.</p>
+""".strip()
+
+# 2) Top Headlines → <li>…</li>
+top_items = top  # tvůj existující seznam top zpráv
+top_items_html = [
+    f'''<li class="item">
+          <div class="rank">{i+1}</div>
+          <div>
+            <a href="{it['url']}">{escape(it['title'])}</a>
+            <div class="meta">{escape(it.get('source',''))}{' · ' + escape(it.get('when','')) if it.get('when') else ''}{' · Grund: ' + escape(it.get('why','')) if it.get('why') else ''}</div>
+          </div>
+        </li>'''
+    for i, it in enumerate(top_items)
+]
+
+# 3) Google Reviews – pokud zatím nemáš data, nech prázdný řádek s poznámkou
+review_rows = [
+    f'''<tr>
+          <td>{escape(r.get('region','–'))} – {escape(r.get('store','–'))}</td>
+          <td>{r.get('avg','–')}</td>
+          <td class="{ 'pos' if r.get('delta',0)>=0 else 'neg' }">{(r.get('delta') if r.get('delta') is not None else '–')}</td>
+          <td>{r.get('count_24h','–')}</td>
+          <td>{escape(r.get('flag','–'))}</td>
+        </tr>'''
+    for r in (reviews or [])
+]
+if not review_rows:
+    review_rows = ["""<tr><td colspan="5" class="muted">Keine auffälligen 24h-Veränderungen (Pilotmodus). Aktivierbar via SerpAPI.</td></tr>"""]
+reviews_note = "Δ = Veränderung der Ø-Bewertung in den letzten 24 Stunden."
+
+# 4) Urgent & Boulevard – můžeš později napojit na detekci klíčových slov
+urgent_list = []   # např. články s „Rückruf“, „Skandal“, …
+rumors = []        # virální/bulvární zmínky
+
+urgent_block_html = "" if not urgent_list else (
+    "<div class='card'><div class='card-header'><h2>⚠️ Urgent Alerts</h2></div><div class='card-body'>"
+    + "".join([f"<div class='alert'><a href='{u['url']}'>{escape(u['title'])}</a><div class='meta'>{escape(u.get('why',''))}</div></div>" for u in urgent_list])
+    + "</div></div>"
+)
+
+rumors_block_html = "" if not rumors else (
+    "<div class='card'><div class='card-header'><h2>🟨 Boulevard & Rumors</h2></div><div class='card-body'>"
+    + "".join([f"<div class='rumor'><a href='{b['url']}'>{escape(b['title'])}</a><div class='meta'>Quelle: {escape(b.get('source',''))}{' · Risiko: ' + escape(b.get('risk','')) if b.get('risk') else ''}</div></div>" for b in rumors])
+    + "</div></div>"
+)
+
+# 5) International – použij tvůj existující seznam `intl`
+international_items_html = [
+    f'''<li class="item">
+          <div class="rank">•</div>
+          <div>
+            <a href="{it['url']}">{escape(it['title'])}</a>
+            <div class="meta">{escape(it.get('source',''))}{' · ' + escape(it.get('type','')) if it.get('type') else ''}</div>
+          </div>
+        </li>'''
+    for it in (intl or [])
+]
+
+# 6) Složení finálního HTML podle {…} placeholderů v šabloně
+html = template_str.format(
+    date_str=date_de(TIMEZONE),
+    tz=TIMEZONE,
+    recipient=RECIPIENT,
+
+    executive_summary_html=executive_summary_html,
+    top_count=len(top_items),
+    top_headlines_html="\n".join(top_items_html),
+
+    reviews_table_rows_html="\n".join(review_rows),
+    reviews_note=reviews_note,
+
+    urgent_block_html=urgent_block_html,
+    rumors_block_html=rumors_block_html,
+
+    international_html="\n".join(international_items_html)
+)
+# === KONEC BLOKU PRO RENDER ===
+
 
     pdf_name = f"full_report_{datetime.now().strftime('%Y-%m-%d')}.pdf"
     build_pdf(pdf_name, items, intl, reviews)
