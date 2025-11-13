@@ -1,24 +1,41 @@
 name: Kaufland Monitoring Automation
 
 on:
+  # Denní automatický běh (čas je v UTC!)
   schedule:
-    - cron: '25 6 * * *'   # Denní report – 07:25 CET
-    - cron: '*/10 * * * *' # Urgent alerty – každých 10 minut
-  workflow_dispatch:       # umožní i ruční spuštění
+    # 05:25 UTC ≈ 06:25 CET
+    - cron: "25 5 * * *"
+  # Ruční spuštění z tab Actions
+  workflow_dispatch: {}
 
 jobs:
   run-monitoring:
     runs-on: ubuntu-latest
 
+    env:
+      TIMEZONE: Europe/Berlin
+      RECIPIENT: ${{ secrets.RECIPIENT }}
+      RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+      EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Python
-        uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
+          python-version: "3.11"
+
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
       - name: Daily Report
-        run: python daily_report.py
+        run: |
+          python daily_report.py
+
       - name: Urgent Watcher
-        run: python urgent_watcher.py
+        run: |
+          python urgent_watcher.py
