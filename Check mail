@@ -1,0 +1,10 @@
+      - name: Check required env
+        run: |
+          for k in SENDER_EMAIL SMTP_APP_PASSWORD RECIPIENT TIMEZONE; do
+            if [ -z "${!k}" ]; then echo "::error::$k is EMPTY"; exit 1; else echo "$k=OK"; fi
+          done
+        env:
+          SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+          SMTP_APP_PASSWORD: ${{ secrets.SMTP_APP_PASSWORD }}
+          RECIPIENT: stefan.hoppe@kaufland.de
+          TIMEZONE: Europe/Berlin
