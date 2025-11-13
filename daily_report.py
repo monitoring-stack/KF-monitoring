@@ -1,37 +1,37 @@
-import os, re, json, feedparser
+import os, json, feedparser
 from bs4 import BeautifulSoup
 from datetime import datetime
-from dateutil import tz
-from html import escape                    # ← používáme místo Jinja2
-# from jinja2 import Template              # ← už nepotřebujeme
+from html import escape
+
 from reportlab.lib.pagesizes import A4
-from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import mm
+
 from helpers import date_de, classify, build_email, send_via_gmail
 
-TIMEZONE = os.getenv('TIMEZONE','Europe/Berlin')
-RECIPIENT = os.getenv('RECIPIENT')
-SENDER = os.getenv('SENDER_EMAIL')
-APP_PWD = os.getenv('SMTP_APP_PASSWORD')
-CC = os.getenv('CC')
-BCC = os.getenv('BCC')
-MAX_TOP = int(os.getenv('MAX_TOP','10'))
-INCLUDE_REVIEWS = os.getenv('INCLUDE_REVIEWS','false').lower() == 'true'
-SERPAPI_KEY = os.getenv('SERPAPI_KEY')
-PLACES_JSON = os.getenv('PLACES_JSON','[]')
-REGIONS_JSON = os.getenv('REGIONS_JSON','{}')
+# ===== Config from env =====
+TIMEZONE   = os.getenv('TIMEZONE', 'Europe/Berlin')
+RECIPIENT  = os.getenv('RECIPIENT')
+SENDER     = os.getenv('SENDER_EMAIL')
+APP_PWD    = os.getenv('SMTP_APP_PASSWORD')
+CC         = os.getenv('CC')
+BCC        = os.getenv('BCC')
+MAX_TOP    = int(os.getenv('MAX_TOP', '10'))
+REGIONS_JSON = os.getenv('REGIONS_JSON', '{}')   # pro budoucí využití
 
+# ===== News feeds =====
 FEEDS = [
     "https://news.google.com/rss/search?q=Kaufland+Deutschland&hl=de&gl=DE&ceid=DE:de",
     "https://news.google.com/rss/search?q=Kaufland+Filiale&hl=de&gl=DE&ceid=DE:de",
     "https://news.google.com/rss/search?q=Kaufland+Skandal+OR+R%C3%BCckruf+OR+Boykott&hl=de&gl=DE&ceid=DE:de",
 ]
 
+# ---------- helpers ----------
+
 def fetch_news():
-    seen = set()
-    items = []
+    """Stáhne a seřadí zprávy podle skóre z classify()."""
+    seen, items = set(), []
     for url in FEEDS:
         d = feedparser.parse(url)
         for e in d.entries:
@@ -40,7 +40,7 @@ def fetch_news():
                 continue
             seen.add(link)
             title = e.title
-            desc = BeautifulSoup(getattr(e,'summary',''), 'html.parser').get_text()
+            desc = BeautifulSoup(getattr(e, 'summary', ''), 'html.parser').get_text()
             host, typ, score = classify(link, title)
             items.append({
                 'title': title,
@@ -54,36 +54,20 @@ def fetch_news():
     items.sort(key=lambda x: x['score'], reverse=True)
     return items
 
-def bucket_by_region(items, regions_json):
-    try:
-        regions = json.loads(regions_json) if regions_json else {}
-    except Exception:
-        regions = {}
-    buckets = {k: [] for k in regions.keys()}
-    buckets["Sonstiges"] = []
-    for it in items:
-        text = f"{it['title']} {it.get('summary','')} {it.get('url','')}".lower()
-        assigned = False
-        for region, keywords in regions.items():
-            for kw in keywords:
-                if kw.lower() in text:
-                    buckets[region].append(it)
-                    assigned = True
-                    break
-            if assigned:
-                break
-        if not assigned:
-            buckets["Sonstiges"].append(it)
-    return {k: v for k, v in buckets.items() if v}
 
 def build_pdf(filename, items, intl, reviews):
+    """Jednoduchý tabulkový PDF export."""
     styles = getSampleStyleSheet()
-    doc = SimpleDocTemplate(filename, pagesize=A4, leftMargin=18*mm, rightMargin=18*mm, topMargin=16*mm, bottomMargin=16*mm)
+    doc = SimpleDocTemplate(
+        filename, pagesize=A4,
+        leftMargin=18*mm, rightMargin=18*mm,
+        topMargin=16*mm, bottomMargin=16*mm
+    )
     story = []
     story.append(Paragraph(f"Kaufland Full Report – {date_de(TIMEZONE)}", styles['Title']))
     story.append(Spacer(1, 8))
 
-    data = [["Titel","Quelle","Typ","Kurzfassung","Link"]]
+    data = [["Titel", "Quelle", "Typ", "Kurzfassung", "Link"]]
     for i in items:
         data.append([i['title'], i['source'], i['type'], i['summary'], i['url']])
     for x in intl:
@@ -91,26 +75,39 @@ def build_pdf(filename, items, intl, reviews):
 
     tbl = Table(data, colWidths=[60*mm, 30*mm, 25*mm, 55*mm, 30*mm])
     tbl.setStyle(TableStyle([
-        ('BACKGROUND',(0,0),(-1,0), '#E60000'),
-        ('TEXTCOLOR',(0,0),(-1,0), 'white'),
-        ('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),
-        ('FONTSIZE',(0,0),(-1,0),10),
-        ('GRID',(0,0),(-1,-1), 0.25, 'grey'),
-        ('VALIGN',(0,0),(-1,-1),'TOP'),
-        ('FONTSIZE',(0,1),(-1,-1),9),
+        ('BACKGROUND', (0,0), (-1,0), '#E60000'),
+        ('TEXTCOLOR',  (0,0), (-1,0), 'white'),
+        ('FONTNAME',   (0,0), (-1,0), 'Helvetica-Bold'),
+        ('FONTSIZE',   (0,0), (-1,0), 10),
+        ('GRID',       (0,0), (-1,-1), 0.25, 'grey'),
+        ('VALIGN',     (0,0), (-1,-1), 'TOP'),
+        ('FONTSIZE',   (0,1), (-1,-1), 9),
     ]))
     story.append(tbl)
     doc.build(story)
 
+
+def render_template_safe(template_str: str, **fields) -> str:
+    """
+    Bezpečně nahradí placeholdery v HTML šabloně, která obsahuje i CSS s { }.
+    Všechny { } se nejprve escapnou na {{ }}, poté se naše klíče vrátí zpět.
+    """
+    escaped = template_str.replace('{', '{{').replace('}', '}}')
+    for key in fields.keys():
+        escaped = escaped.replace('{{' + key + '}}', '{' + key + '}')
+    return escaped.format(**fields)
+
+
+# ---------- main ----------
+
 def main():
     items = fetch_news()
     top = items[:MAX_TOP]
-    others = items[MAX_TOP:50]
-    intl = [it for it in items if not it['source'].endswith('.de')][:5]
-    reviews = []  # optional later via SerpAPI
+    intl = [it for it in items if not it.get('source','').endswith('.de')][:5]
+    reviews = []  # místo pro SerpAPI/Google Reviews (volitelně)
 
-    # === RENDER NOVÉ ŠABLONY email_template.html (bez Jinja2) ===
-    template_str = open('email_template.html','r',encoding='utf-8').read()
+    # --- připrav emailové bloky ---
+    template_str = open('email_template.html', 'r', encoding='utf-8').read()
 
     executive_summary_html = """
     <p><strong>Insight:</strong> Kurátorsky vybrané Top-Schlagzeilen (1–10); další zmínky níže.</p>
@@ -118,7 +115,6 @@ def main():
     <p><strong>Aktion:</strong> Sledujeme Google Reviews a posíláme ⚠️ alerty při anomáliích.</p>
     """.strip()
 
-    top_items = top
     top_items_html = [
         f'''<li class="item">
               <div class="rank">{i+1}</div>
@@ -127,7 +123,7 @@ def main():
                 <div class="meta">{escape(it.get('source',''))}{' · ' + escape(it.get('when','')) if it.get('when') else ''}{' · Grund: ' + escape(it.get('why','')) if it.get('why') else ''}</div>
               </div>
             </li>'''
-        for i, it in enumerate(top_items)
+        for i, it in enumerate(top)
     ]
 
     review_rows = [
@@ -139,25 +135,10 @@ def main():
               <td>{escape(r.get('flag','–'))}</td>
             </tr>'''
         for r in (reviews or [])
-    ]
-    if not review_rows:
-        review_rows = ["""<tr><td colspan="5" class="muted">Keine auffälligen 24h-Veränderungen (Pilotmodus). Aktivierbar via SerpAPI.</td></tr>"""]
-    reviews_note = "Δ = Veränderung der Ø-Bewertung in den letzten 24 Stunden."
+    ] or ["""<tr><td colspan="5" class="muted">Keine auffälligen 24h-Veränderungen (Pilotmodus). Aktivierbar via SerpAPI.</td></tr>"""]
 
-    urgent_list = []
-    rumors = []
-
-    urgent_block_html = "" if not urgent_list else (
-        "<div class='card'><div class='card-header'><h2>⚠️ Urgent Alerts</h2></div><div class='card-body'>"
-        + "".join([f"<div class='alert'><a href='{u['url']}'>{escape(u['title'])}</a><div class='meta'>{escape(u.get('why',''))}</div></div>" for u in urgent_list])
-        + "</div></div>"
-    )
-
-    rumors_block_html = "" if not rumors else (
-        "<div class='card'><div class='card-header'><h2>🟨 Boulevard & Rumors</h2></div><div class='card-body'>"
-        + "".join([f"<div class='rumor'><a href='{b['url']}'>{escape(b['title'])}</a><div class='meta'>Quelle: {escape(b.get('source',''))}{' · Risiko: ' + escape(b.get('risk','')) if b.get('risk') else ''}</div></div>" for b in rumors])
-        + "</div></div>"
-    )
+    urgent_block_html = ""   # později můžeš napojit na urgent_watcher.py
+    rumors_block_html = ""   # volitelná sekce pro virální/bulvární zmínky
 
     international_items_html = [
         f'''<li class="item">
@@ -170,20 +151,21 @@ def main():
         for it in (intl or [])
     ]
 
-    html = template_str.format(
+    # --- bezpečné složení výsledného HTML ---
+    html = render_template_safe(
+        template_str,
         date_str=date_de(TIMEZONE),
         tz=TIMEZONE,
         recipient=RECIPIENT,
         executive_summary_html=executive_summary_html,
-        top_count=len(top_items),
+        top_count=len(top),
         top_headlines_html="\n".join(top_items_html),
         reviews_table_rows_html="\n".join(review_rows),
-        reviews_note=reviews_note,
+        reviews_note="Δ = Veränderung der Ø-Bewertung in den letzten 24 Stunden.",
         urgent_block_html=urgent_block_html,
         rumors_block_html=rumors_block_html,
         international_html="\n".join(international_items_html)
     )
-    # === KONEC BLOKU PRO RENDER ===
 
     # --- PDF + e-mail ---
     pdf_name = f"full_report_{datetime.now().strftime('%Y-%m-%d')}.pdf"
@@ -192,6 +174,7 @@ def main():
     subject = f"📰 Kaufland Media & Review Briefing | {date_de(TIMEZONE)}"
     msg = build_email(SENDER, RECIPIENT, subject, html, attachments=[pdf_name], cc=CC, bcc=BCC)
     send_via_gmail(msg, SENDER, APP_PWD)
+
 
 if __name__ == '__main__':
     main()
