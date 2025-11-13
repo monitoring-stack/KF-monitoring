@@ -340,20 +340,25 @@ Keine auffälligen 24h-Veränderungen (Pilotmodus). Aktivierbar via SerpAPI.
 </li>""".strip()
         )
 
-    # === 6) Dosazení do HTML šablony ===
-    html = template_str.format(
-        date_str=date_de(TIMEZONE),
-        tz=TIMEZONE,
-        recipient=EMAIL_TO or "",
-        executive_summary_html=executive_summary_html,
-        top_count=len(top_items),
-        top_headlines_html="\n".join(top_items_html),
-        reviews_table_rows_html="\n".join(review_rows),
-        reviews_note=reviews_note,
-        urgent_block_html=urgent_block_html,
-        rumors_block_html=rumors_block_html,
-        international_html="\n".join(international_items_html),
-    )
+   # === 6) Dosazení do HTML šablony (bez .format, ruční replace) ===
+    html = template_str
+
+    replacements = {
+        "{date_str}": date_de(TIMEZONE),
+        "{tz}": TIMEZONE,
+        "{recipient}": EMAIL_TO or "",
+        "{executive_summary_html}": executive_summary_html,
+        "{top_count}": str(len(top_items)),
+        "{top_headlines_html}": "\n".join(top_items_html),
+        "{reviews_table_rows_html}": "\n".join(review_rows),
+        "{reviews_note}": reviews_note,
+        "{urgent_block_html}": urgent_block_html,
+        "{rumors_block_html}": rumors_block_html,
+        "{international_html}": "\n".join(international_items_html),
+    }
+
+    for key, val in replacements.items():
+        html = html.replace(key, val)
 
     # === PDF + odeslání ===
     pdf_name = f"full_report_{datetime.now().strftime('%Y-%m-%d')}.pdf"
