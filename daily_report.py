@@ -1,9 +1,9 @@
-
 import os, re, json, feedparser
 from bs4 import BeautifulSoup
 from datetime import datetime
 from dateutil import tz
-from jinja2 import Template
+from html import escape                    # ← používáme místo Jinja2
+# from jinja2 import Template              # ← už nepotřebujeme
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
@@ -24,9 +24,9 @@ PLACES_JSON = os.getenv('PLACES_JSON','[]')
 REGIONS_JSON = os.getenv('REGIONS_JSON','{}')
 
 FEEDS = [
-  "https://news.google.com/rss/search?q=Kaufland+Deutschland&hl=de&gl=DE&ceid=DE:de",
-  "https://news.google.com/rss/search?q=Kaufland+Filiale&hl=de&gl=DE&ceid=DE:de",
-  "https://news.google.com/rss/search?q=Kaufland+Skandal+OR+R%C3%BCckruf+OR+Boykott&hl=de&gl=DE&ceid=DE:de",
+    "https://news.google.com/rss/search?q=Kaufland+Deutschland&hl=de&gl=DE&ceid=DE:de",
+    "https://news.google.com/rss/search?q=Kaufland+Filiale&hl=de&gl=DE&ceid=DE:de",
+    "https://news.google.com/rss/search?q=Kaufland+Skandal+OR+R%C3%BCckruf+OR+Boykott&hl=de&gl=DE&ceid=DE:de",
 ]
 
 def fetch_news():
@@ -36,7 +36,8 @@ def fetch_news():
         d = feedparser.parse(url)
         for e in d.entries:
             link = e.link
-            if link in seen: continue
+            if link in seen:
+                continue
             seen.add(link)
             title = e.title
             desc = BeautifulSoup(getattr(e,'summary',''), 'html.parser').get_text()
@@ -44,15 +45,14 @@ def fetch_news():
             items.append({
                 'title': title,
                 'url': link,
-                'summary': (desc[:260] + '…') if len(desc)>260 else desc,
+                'summary': (desc[:260] + '…') if len(desc) > 260 else desc,
                 'source': host,
                 'type': typ,
                 'score': score,
-                'why': 'relevant' if score>=4 else 'beobachten'
+                'why': 'relevant' if score >= 4 else 'beobachten'
             })
     items.sort(key=lambda x: x['score'], reverse=True)
     return items
-
 
 def bucket_by_region(items, regions_json):
     try:
@@ -70,12 +70,11 @@ def bucket_by_region(items, regions_json):
                     buckets[region].append(it)
                     assigned = True
                     break
-            if assigned: break
+            if assigned:
+                break
         if not assigned:
             buckets["Sonstiges"].append(it)
-    # remove empty regions except Sonstiges if empty
-    return {k:v for k,v in buckets.items() if v}
-
+    return {k: v for k, v in buckets.items() if v}
 
 def build_pdf(filename, items, intl, reviews):
     styles = getSampleStyleSheet()
@@ -107,100 +106,86 @@ def main():
     items = fetch_news()
     top = items[:MAX_TOP]
     others = items[MAX_TOP:50]
-
     intl = [it for it in items if not it['source'].endswith('.de')][:5]
-
     reviews = []  # optional later via SerpAPI
 
     # === RENDER NOVÉ ŠABLONY email_template.html (bez Jinja2) ===
-from html import escape
+    template_str = open('email_template.html','r',encoding='utf-8').read()
 
-template_str = open('email_template.html','r',encoding='utf-8').read()
+    executive_summary_html = """
+    <p><strong>Insight:</strong> Kurátorsky vybrané Top-Schlagzeilen (1–10); další zmínky níže.</p>
+    <p><strong>Implikation:</strong> Přehled v jednom e-mailu; regionální rozdíly lze rychle dohledat.</p>
+    <p><strong>Aktion:</strong> Sledujeme Google Reviews a posíláme ⚠️ alerty při anomáliích.</p>
+    """.strip()
 
-# 1) Executive summary – klidně uprav 3–5 vět
-executive_summary_html = """
-<p><strong>Insight:</strong> Kurátorsky vybrané Top-Schlagzeilen (1–10); další zmínky níže.</p>
-<p><strong>Implikation:</strong> Přehled v jednom e-mailu; regionální rozdíly lze rychle dohledat.</p>
-<p><strong>Aktion:</strong> Sledujeme Google Reviews a posíláme ⚠️ alerty při anomáliích.</p>
-""".strip()
+    top_items = top
+    top_items_html = [
+        f'''<li class="item">
+              <div class="rank">{i+1}</div>
+              <div>
+                <a href="{it['url']}">{escape(it['title'])}</a>
+                <div class="meta">{escape(it.get('source',''))}{' · ' + escape(it.get('when','')) if it.get('when') else ''}{' · Grund: ' + escape(it.get('why','')) if it.get('why') else ''}</div>
+              </div>
+            </li>'''
+        for i, it in enumerate(top_items)
+    ]
 
-# 2) Top Headlines → <li>…</li>
-top_items = top  # tvůj existující seznam top zpráv
-top_items_html = [
-    f'''<li class="item">
-          <div class="rank">{i+1}</div>
-          <div>
-            <a href="{it['url']}">{escape(it['title'])}</a>
-            <div class="meta">{escape(it.get('source',''))}{' · ' + escape(it.get('when','')) if it.get('when') else ''}{' · Grund: ' + escape(it.get('why','')) if it.get('why') else ''}</div>
-          </div>
-        </li>'''
-    for i, it in enumerate(top_items)
-]
+    review_rows = [
+        f'''<tr>
+              <td>{escape(r.get('region','–'))} – {escape(r.get('store','–'))}</td>
+              <td>{r.get('avg','–')}</td>
+              <td class="{ 'pos' if r.get('delta',0)>=0 else 'neg' }">{(r.get('delta') if r.get('delta') is not None else '–')}</td>
+              <td>{r.get('count_24h','–')}</td>
+              <td>{escape(r.get('flag','–'))}</td>
+            </tr>'''
+        for r in (reviews or [])
+    ]
+    if not review_rows:
+        review_rows = ["""<tr><td colspan="5" class="muted">Keine auffälligen 24h-Veränderungen (Pilotmodus). Aktivierbar via SerpAPI.</td></tr>"""]
+    reviews_note = "Δ = Veränderung der Ø-Bewertung in den letzten 24 Stunden."
 
-# 3) Google Reviews – pokud zatím nemáš data, nech prázdný řádek s poznámkou
-review_rows = [
-    f'''<tr>
-          <td>{escape(r.get('region','–'))} – {escape(r.get('store','–'))}</td>
-          <td>{r.get('avg','–')}</td>
-          <td class="{ 'pos' if r.get('delta',0)>=0 else 'neg' }">{(r.get('delta') if r.get('delta') is not None else '–')}</td>
-          <td>{r.get('count_24h','–')}</td>
-          <td>{escape(r.get('flag','–'))}</td>
-        </tr>'''
-    for r in (reviews or [])
-]
-if not review_rows:
-    review_rows = ["""<tr><td colspan="5" class="muted">Keine auffälligen 24h-Veränderungen (Pilotmodus). Aktivierbar via SerpAPI.</td></tr>"""]
-reviews_note = "Δ = Veränderung der Ø-Bewertung in den letzten 24 Stunden."
+    urgent_list = []
+    rumors = []
 
-# 4) Urgent & Boulevard – můžeš později napojit na detekci klíčových slov
-urgent_list = []   # např. články s „Rückruf“, „Skandal“, …
-rumors = []        # virální/bulvární zmínky
+    urgent_block_html = "" if not urgent_list else (
+        "<div class='card'><div class='card-header'><h2>⚠️ Urgent Alerts</h2></div><div class='card-body'>"
+        + "".join([f"<div class='alert'><a href='{u['url']}'>{escape(u['title'])}</a><div class='meta'>{escape(u.get('why',''))}</div></div>" for u in urgent_list])
+        + "</div></div>"
+    )
 
-urgent_block_html = "" if not urgent_list else (
-    "<div class='card'><div class='card-header'><h2>⚠️ Urgent Alerts</h2></div><div class='card-body'>"
-    + "".join([f"<div class='alert'><a href='{u['url']}'>{escape(u['title'])}</a><div class='meta'>{escape(u.get('why',''))}</div></div>" for u in urgent_list])
-    + "</div></div>"
-)
+    rumors_block_html = "" if not rumors else (
+        "<div class='card'><div class='card-header'><h2>🟨 Boulevard & Rumors</h2></div><div class='card-body'>"
+        + "".join([f"<div class='rumor'><a href='{b['url']}'>{escape(b['title'])}</a><div class='meta'>Quelle: {escape(b.get('source',''))}{' · Risiko: ' + escape(b.get('risk','')) if b.get('risk') else ''}</div></div>" for b in rumors])
+        + "</div></div>"
+    )
 
-rumors_block_html = "" if not rumors else (
-    "<div class='card'><div class='card-header'><h2>🟨 Boulevard & Rumors</h2></div><div class='card-body'>"
-    + "".join([f"<div class='rumor'><a href='{b['url']}'>{escape(b['title'])}</a><div class='meta'>Quelle: {escape(b.get('source',''))}{' · Risiko: ' + escape(b.get('risk','')) if b.get('risk') else ''}</div></div>" for b in rumors])
-    + "</div></div>"
-)
+    international_items_html = [
+        f'''<li class="item">
+              <div class="rank">•</div>
+              <div>
+                <a href="{it['url']}">{escape(it['title'])}</a>
+                <div class="meta">{escape(it.get('source',''))}{' · ' + escape(it.get('type','')) if it.get('type') else ''}</div>
+              </div>
+            </li>'''
+        for it in (intl or [])
+    ]
 
-# 5) International – použij tvůj existující seznam `intl`
-international_items_html = [
-    f'''<li class="item">
-          <div class="rank">•</div>
-          <div>
-            <a href="{it['url']}">{escape(it['title'])}</a>
-            <div class="meta">{escape(it.get('source',''))}{' · ' + escape(it.get('type','')) if it.get('type') else ''}</div>
-          </div>
-        </li>'''
-    for it in (intl or [])
-]
+    html = template_str.format(
+        date_str=date_de(TIMEZONE),
+        tz=TIMEZONE,
+        recipient=RECIPIENT,
+        executive_summary_html=executive_summary_html,
+        top_count=len(top_items),
+        top_headlines_html="\n".join(top_items_html),
+        reviews_table_rows_html="\n".join(review_rows),
+        reviews_note=reviews_note,
+        urgent_block_html=urgent_block_html,
+        rumors_block_html=rumors_block_html,
+        international_html="\n".join(international_items_html)
+    )
+    # === KONEC BLOKU PRO RENDER ===
 
-# 6) Složení finálního HTML podle {…} placeholderů v šabloně
-html = template_str.format(
-    date_str=date_de(TIMEZONE),
-    tz=TIMEZONE,
-    recipient=RECIPIENT,
-
-    executive_summary_html=executive_summary_html,
-    top_count=len(top_items),
-    top_headlines_html="\n".join(top_items_html),
-
-    reviews_table_rows_html="\n".join(review_rows),
-    reviews_note=reviews_note,
-
-    urgent_block_html=urgent_block_html,
-    rumors_block_html=rumors_block_html,
-
-    international_html="\n".join(international_items_html)
-)
-# === KONEC BLOKU PRO RENDER ===
-
-
+    # --- PDF + e-mail ---
     pdf_name = f"full_report_{datetime.now().strftime('%Y-%m-%d')}.pdf"
     build_pdf(pdf_name, items, intl, reviews)
 
