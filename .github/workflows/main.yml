@@ -12,11 +12,11 @@ jobs:
   run-monitoring:
     runs-on: ubuntu-latest
 
-    env:
-      TIMEZONE: Europe/Berlin
-      RECIPIENT: ${{ secrets.RECIPIENT }}
-      RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-      EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+ env:
+  TIMEZONE: Europe/Berlin
+  RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+  EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+  EMAIL_TO: ${{ secrets.EMAIL_TO }}
 
     steps:
       - name: Checkout repository
