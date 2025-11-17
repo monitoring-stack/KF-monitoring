@@ -1,159 +1,134 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="de">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Kaufland Media & Review Briefing</title>
-
+<meta charset="utf-8" />
+<title>Kaufland Monitoring</title>
 <style>
-  :root{
-    --kf-red:#E3000F;       /* Kaufland red */
-    --kf-dk:#1F1F1F;
-    --kf-txt:#2B2B2B;
-    --kf-gray:#F4F5F7;
-    --kf-mid:#8A8F98;
+  body {
+    font-family: Arial, sans-serif;
+    background: #f5f5f5;
+    margin: 0;
+    padding: 0;
   }
-
-  /* Email/PDF-safe base */
-  html,body{margin:0;padding:0;background:#fff;color:var(--kf-txt);font:15px/1.55 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;}
-  a{color:#0057D9;text-decoration:none;}
-  a:hover{text-decoration:underline;}
-  img{max-width:100%;height:auto;border:0;}
-
-  /* Container */
-  .wrap{max-width:860px;margin:0 auto;padding:28px 22px 40px;}
-  .card{background:#fff;border:1px solid #EDEFF2;border-radius:12px;overflow:hidden;margin:18px 0;}
-  .card-header{padding:18px 20px;border-bottom:1px solid #EEE;background:linear-gradient(180deg,#fff 0,#fafafa 100%);}
-  .card-body{padding:18px 20px;}
-  .muted{color:var(--kf-mid);}
-
-  /* Header */
-  .brand{display:flex;align-items:center;gap:14px;margin-bottom:18px;}
-  .logo{width:40px;height:40px;border:2px solid var(--kf-red);border-radius:6px;display:grid;place-items:center;font-weight:800;color:var(--kf-red);}
-  .title{font-size:20px;font-weight:700;color:var(--kf-dk);line-height:1.2;}
-  .subtitle{font-size:13px;color:var(--kf-mid);}
-
-  /* Section titles */
-  h2{margin:0 0 10px;font-size:16px;color:var(--kf-dk);}
-  .pill{display:inline-block;font-size:12px;color:#fff;background:var(--kf-red);padding:2px 8px;border-radius:999px;margin-left:8px;vertical-align:1px;}
-
-  /* Lists */
-  .list{list-style:none;margin:0;padding:0;}
-  .item{display:flex;gap:10px;padding:12px 0;border-bottom:1px solid #F0F1F3;}
-  .item:last-child{border-bottom:0;}
-  .rank{min-width:22px;height:22px;border-radius:6px;background:var(--kf-gray);color:#586070;font-weight:700;display:grid;place-items:center;}
-  .item a{font-weight:600;color:var(--kf-dk);}
-  .meta{font-size:12px;color:var(--kf-mid);margin-top:4px;}
-
-  /* Reviews table */
-  table{width:100%;border-collapse:collapse;}
-  th,td{padding:10px 8px;border-bottom:1px solid #ECEFF3;text-align:left;}
-  th{font-size:12px;color:#6B7280;background:#FBFBFC;}
-  .pos{color:#0F8C3A;font-weight:600;}
-  .neg{color:#D92D20;font-weight:600;}
-
-  /* Alerts/bulvár sekce */
-  .alert{border-left:4px solid #D92D20;background:#FFF4F2;padding:12px 14px;border-radius:8px;margin:10px 0;}
-  .rumor{border-left:4px solid #FDB022;background:#FFFAEB;padding:12px 14px;border-radius:8px;margin:10px 0;}
-
-  /* Footer + print */
-  .footer{margin-top:24px;font-size:12px;color:var(--kf-mid);}
-  @media print{
-    .wrap{padding:10mm;}
-    .card{page-break-inside:avoid;}
-    .page-break{page-break-before:always;}
-    a{color:#000;text-decoration:underline;}
+  .container {
+    max-width: 850px;
+    margin: 0 auto;
+    background: #ffffff;
+    padding: 25px;
+    border-radius: 10px;
+  }
+  h1 {
+    color: #E60000;
+    margin-bottom: 10px;
+  }
+  h2 {
+    margin-top: 30px;
+    margin-bottom: 8px;
+    color: #E60000;
+  }
+  .meta {
+    font-size: 12px;
+    color: #666;
+  }
+  ul {
+    list-style: none;
+    padding-left: 0;
+  }
+  .item {
+    margin-bottom: 14px;
+  }
+  .item .rank {
+    font-weight: bold;
+    margin-right: 6px;
+  }
+  .card {
+    background: #fafafa;
+    padding: 15px;
+    border-radius: 8px;
+    margin-top: 15px;
+  }
+  .table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 12px;
+  }
+  .table th, .table td {
+    border: 1px solid #ddd;
+    padding: 8px;
+    font-size: 14px;
+  }
+  .table th {
+    background: #E60000;
+    color: white;
+  }
+  .muted {
+    color: #888;
+    font-size: 13px;
+    text-align: center;
+    padding: 12px;
   }
 </style>
 </head>
+
 <body>
-  <div class="wrap">
+<div class="container">
 
-    <!-- HEADER -->
-    <div class="brand">
-      <div class="logo">K</div>
-      <div>
-        <div class="title">Kaufland Media & Review Briefing</div>
-        <div class="subtitle">
-          {date_str} · Zeitzone {tz} · Empfänger: {recipient}
-        </div>
-      </div>
-    </div>
+  <h1>Kaufland Media & Review Briefing</h1>
+  <p><strong>Datum:</strong> {date_str} • <strong>Zeitzone:</strong> {tz}</p>
+  <p><strong>Empfänger:</strong> {recipient}</p>
 
-    <!-- SUMMARY CARD -->
-    <div class="card">
-      <div class="card-header">
-        <h2>Executive Summary</h2>
-      </div>
-      <div class="card-body">
-        <div>{executive_summary_html}</div>
-        <div class="muted" style="margin-top:8px;">
-          Quellen: Offizielle Medien, Google Reviews (DE), Social Listening & News-RSS.
-        </div>
-      </div>
-    </div>
-
-    <!-- TOP HEADLINES -->
-    <div class="card">
-      <div class="card-header">
-        <h2>Top Schlagzeilen <span class="pill">{top_count}</span></h2>
-      </div>
-      <div class="card-body">
-        <ol class="list">
-          {top_headlines_html}
-        </ol>
-      </div>
-    </div>
-
-    <!-- GOOGLE REVIEWS (DE) -->
-    <div class="card">
-      <div class="card-header">
-        <h2>Google Reviews – Deutschland</h2>
-      </div>
-      <div class="card-body">
-        <table>
-          <thead>
-            <tr>
-              <th>Region / Filiale</th>
-              <th>Ø Bewertung</th>
-              <th>Δ 24h</th>
-              <th>Reviews 24h</th>
-              <th>Auffälligkeiten</th>
-            </tr>
-          </thead>
-          <tbody>
-            {reviews_table_rows_html}
-          </tbody>
-        </table>
-        <div class="muted" style="margin-top:8px">{reviews_note}</div>
-      </div>
-    </div>
-
-    <!-- URGENT ALERTS -->
-    {urgent_block_html}
-
-    <!-- BOULEVARD / RUMORS -->
-    {rumors_block_html}
-
-    <!-- INTERNATIONAL VIRALS -->
-    <div class="card page-break">
-      <div class="card-header">
-        <h2> Virale Erwähnungen (DE)</h2>
-      </div>
-      <div class="card-body">
-        <ol class="list">
-          {international_html}
-        </ol>
-        <div class="muted" style="margin-top:8px">
-          Nur zur Einordnung (keine unmittelbare Relevanz für DE). Kurze Zusammenfassung in DE ist jeweils beigefügt.
-        </div>
-      </div>
-    </div>
-
-    <!-- FOOTER -->
-    <div class="footer">
-      Dieser Bericht ist automatisch generiert. Für Rückfragen / Korrekturen bitte direkt antworten.
-    </div>
+  <!-- EXECUTIVE SUMMARY -->
+  <h2>Executive Summary</h2>
+  <div class="card">
+    {executive_summary_html}
   </div>
+
+  <!-- TOP HEADLINES -->
+  <h2>Top Schlagzeilen (DE) – {top_count} Meldungen</h2>
+  <ul>
+    {top_headlines_html}
+  </ul>
+
+  <!-- VIRAL DE -->
+  <h2>Virale Erwähnungen (DE)</h2>
+  <ul>
+    {other_de_html}
+  </ul>
+
+  <!-- GOOGLE REVIEWS -->
+  <h2>Google Reviews – Deutschland</h2>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Region / Filiale</th>
+        <th>Ø Bewertung</th>
+        <th>Δ 24h</th>
+        <th>Reviews 24h</th>
+        <th>Auffälligkeiten</th>
+      </tr>
+    </thead>
+    <tbody>
+      {reviews_table_rows_html}
+    </tbody>
+  </table>
+  <p class="meta">{reviews_note}</p>
+
+  <!-- URGENT BLOCK -->
+  {urgent_block_html}
+
+  <!-- RUMORS -->
+  {rumors_block_html}
+
+  <!-- INTERNATIONAL -->
+  <h2>International – Virale Erwähnungen</h2>
+  <ul>
+    {international_html}
+  </ul>
+
+  <p style="margin-top: 40px; font-size: 11px; color:#999;">
+    Dieser Bericht ist automatisch generiert. Für Rückfragen bitte direkt antworten.
+  </p>
+
+</div>
 </body>
 </html>
