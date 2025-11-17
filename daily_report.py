@@ -522,4 +522,3 @@ Noch keine Filial-spezifischen Daten hinterlegt (Pilotmodus).
 
 if __name__ == "__main__":
     main()
-  
