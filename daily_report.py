@@ -4,19 +4,21 @@ import json
 import base64
 import urllib.request
 import urllib.error
-from html import escape
-from datetime import datetime
 
 import feedparser
 from bs4 import BeautifulSoup
+from datetime import datetime
+from html import escape
 
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import (
     SimpleDocTemplate,
     Paragraph,
     Spacer,
+    Table,
+    TableStyle,
 )
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import mm
 
 from helpers import date_de, classify
@@ -25,14 +27,17 @@ from helpers import date_de, classify
 
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Berlin")
 
-# Resend
+# Resend (už máš nastaveno v GitHub Secrets)
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 EMAIL_FROM = os.getenv("EMAIL_FROM")          # např. "Kaufland Monitoring <kaufland.monitoring@gmail.com>"
 EMAIL_TO = os.getenv("EMAIL_TO")              # hlavní příjemce
-CC = os.getenv("CC")                          # např. "a@b.de,c@d.de"
+CC = os.getenv("CC")
 BCC = os.getenv("BCC")
 
 MAX_TOP = int(os.getenv("MAX_TOP", "10"))
+INCLUDE_REVIEWS = os.getenv("INCLUDE_REVIEWS", "false").lower() == "true"
+PLACES_JSON = os.getenv("PLACES_JSON", "[]")
+REGIONS_JSON = os.getenv("REGIONS_JSON", "{}")
 
 FEEDS = [
     "https://news.google.com/rss/search?q=Kaufland+Deutschland&hl=de&gl=DE&ceid=DE:de",
@@ -40,48 +45,31 @@ FEEDS = [
     "https://news.google.com/rss/search?q=Kaufland+Skandal+OR+R%C3%BCckruf+OR+Boykott&hl=de&gl=DE&ceid=DE:de",
 ]
 
-
-# ================== POMOCNÉ FUNKCE ==================
-
-
-def is_german_host(host: str) -> bool:
-    """Rozliší DE vs. ostatní (pro International sekci)."""
-    host = (host or "").lower()
-    return host.endswith(".de") or host.endswith(".de/")
+# ================== NEWS FETCH ==================
 
 
 def fetch_news():
-    """Stáhne news z Google News feedů, odfiltruje duplicity a nerelevantní položky."""
-    seen_links = set()
+    """Načte články z Google News, vyčistí summary a seřadí podle score (desc)."""
+    seen = set()
     items = []
 
     for url in FEEDS:
         d = feedparser.parse(url)
         for e in d.entries:
             link = e.link
-            if link in seen_links:
+            if link in seen:
                 continue
-            seen_links.add(link)
+            seen.add(link)
 
-            title = e.title or ""
-            # Vynutíme přítomnost "Kaufland" v titulku / shrnutí,
-            # aby se do seznamu nedostávaly články o jiných značkách.
-            summary_raw = getattr(e, "summary", "") or ""
-            plain_summary = BeautifulSoup(summary_raw, "html.parser").get_text()
-
-            text_for_filter = f"{title} {plain_summary}"
-            if "kaufland" not in text_for_filter.lower():
-                continue
-
+            title = e.title
+            desc = BeautifulSoup(getattr(e, "summary", ""), "html.parser").get_text()
             host, typ, score = classify(link, title)
 
             items.append(
                 {
-                    "title": title.strip(),
+                    "title": title,
                     "url": link,
-                    "summary": (plain_summary[:260] + "…")
-                    if len(plain_summary) > 260
-                    else plain_summary,
+                    "summary": (desc[:260] + "…") if len(desc) > 260 else desc,
                     "source": host,
                     "type": typ,
                     "score": score,
@@ -89,89 +77,88 @@ def fetch_news():
                 }
             )
 
-    # Seřadit dle našeho skóre (proxy za relevanci / "čtenost")
+    # seřadit podle score (nejdřív nejdůležitější)
     items.sort(key=lambda x: x["score"], reverse=True)
     return items
 
 
-def split_de_intl(items):
-    """Rozdělí položky na DE a International podle domény."""
-    de_items = []
-    intl_items = []
-    for it in items:
-        host = it.get("source", "")
-        if is_german_host(host):
-            de_items.append(it)
+# ================== KLASIFIKACE DE vs INTERNATIONAL ==================
+
+
+DE_KEYWORDS = [
+    "deutschland",
+    "bundesweit",
+    "berlin",
+    "hamburg",
+    "münchen",
+    "köln",
+    "frankfurt",
+    "stuttgart",
+    "leipzig",
+    "nürnberg",
+    "kaufland deutschland",
+]
+
+
+def is_de_article(item):
+    """Hrubá heuristika, zda jde o DE článek."""
+    host = item.get("source", "").lower()
+    title = item.get("title", "").lower()
+    summary = item.get("summary", "").lower()
+
+    # .de doména → DE (výchozí)
+    if host.endswith(".de"):
+        return True
+
+    text = title + " " + summary
+    for kw in DE_KEYWORDS:
+        if kw in text:
+            return True
+
+    return False
+
+
+def split_for_email(items_sorted, max_top):
+    """
+    Z items seřazených podle score udělá tři seznamy bez duplicit URL:
+    - top_de: max_top nejlepších německých článků
+    - other_de: ostatní DE články
+    - intl: international články
+    """
+    top_de = []
+    other_de = []
+    intl = []
+    seen_urls = set()
+
+    for it in items_sorted:
+        url = it["url"]
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+
+        if is_de_article(it):
+            if len(top_de) < max_top:
+                top_de.append(it)
+            else:
+                other_de.append(it)
         else:
-            intl_items.append(it)
+            intl.append(it)
 
-    return de_items, intl_items
-
-
-# -------------------- GOOGLE REVIEWS (STUB) --------------------
-
-
-def get_google_reviews_data():
-    """
-    Zatím žádné přímé napojení na Google Reviews (bez dalšího API / registrací).
-
-    Návrh budoucího stavu:
-      - napojení interních dat nebo služby typu SerpAPI,
-      - pro každou sledovanou filii:
-          * Ø hodnocení,
-          * změna za 24 h (Δ),
-          * počet nových recenzí,
-          * flag 'auffällig' (výrazný pokles / nárůst, hodně nových negativních recenzí...).
-
-    Tato funkce je připravená, aby později stačilo vrátit list dictů.
-    Aktuálně vrací prázdný seznam => email zobrazí vysvětlující placeholder.
-    """
-    return []  # TODO: napojit na reálná data
+    return top_de, other_de, intl
 
 
 # ================== PDF REPORT ==================
 
 
-def build_pdf(filename, de_top, de_rest, intl_items):
+def build_pdf(filename, all_items, reviews):
     """
-    Vytvoří čitelný PDF report:
-      1) Top Schlagzeilen (DE)
-      2) Weitere Erwähnungen (DE)
-      3) International – Virale Erwähnungen
+    Vytvoří PDF:
+    - tabulka článků (seřazená podle score – pořadí z all_items)
+    - pod tím Linkverzeichnis s URL
     """
-
     styles = getSampleStyleSheet()
-
+    normal = styles["Normal"]
     title_style = styles["Title"]
-    section_style = styles["Heading2"]
-
-    article_title_style = ParagraphStyle(
-        "ArticleTitle",
-        parent=styles["Heading4"],
-        fontSize=11,
-        leading=14,
-    )
-
-    meta_style = ParagraphStyle(
-        "Meta",
-        parent=styles["Normal"],
-        fontSize=8.5,
-        textColor="grey",
-    )
-
-    body_style = ParagraphStyle(
-        "Body",
-        parent=styles["Normal"],
-        fontSize=9.5,
-        leading=12,
-    )
-
-    link_style = ParagraphStyle(
-        "Link",
-        parent=styles["Normal"],
-        fontSize=8.5,
-        textColor="blue",
-    )
 
     doc = SimpleDocTemplate(
         filename,
@@ -185,116 +172,54 @@ def build_pdf(filename, de_top, de_rest, intl_items):
     story = []
 
     # Titulek
-    story.append(
-        Paragraph(f"Kaufland Media & Review Briefing – {date_de(TIMEZONE)}", title_style)
+    story.append(Paragraph(f"Kaufland Full Report – {date_de(TIMEZONE)}", title_style))
+    story.append(Spacer(1, 8))
+
+    # Tabulka článků – bez URL, jen index
+    data = [["#", "Titel", "Quelle", "Typ", "Kurzfassung"]]
+
+    for idx, item in enumerate(all_items, start=1):
+        data.append(
+            [
+                str(idx),
+                item["title"],
+                item["source"],
+                item["type"],
+                item["summary"],
+            ]
+        )
+
+    tbl = Table(
+        data,
+        colWidths=[10 * mm, 60 * mm, 25 * mm, 25 * mm, 70 * mm],
+        repeatRows=1,
     )
-    story.append(Spacer(1, 10))
 
-    # ------------------- 1) TOP SCHLAGZEILEN (DE) -------------------
-    if de_top:
-        story.append(Paragraph("Top Schlagzeilen – Deutschland", section_style))
-        story.append(
-            Paragraph(
-                "Priorisiert nach Relevanz/ Risiko (interner Score, nicht echte Reichweite).",
-                meta_style,
-            )
+    tbl.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), "#E60000"),
+                ("TEXTCOLOR", (0, 0), (-1, 0), "white"),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, 0), 10),
+                ("GRID", (0, 0), (-1, -1), 0.25, "grey"),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("FONTSIZE", (0, 1), (-1, -1), 9),
+            ]
         )
-        story.append(Spacer(1, 6))
+    )
 
-        for idx, it in enumerate(de_top, start=1):
-            story.append(
-                Paragraph(f"{idx}. {escape(it['title'])}", article_title_style)
-            )
-            meta_parts = [escape(it.get("source", ""))]
-            if it.get("type"):
-                meta_parts.append(escape(it["type"]))
-            if it.get("why"):
-                meta_parts.append("Grund: " + escape(it["why"]))
-            story.append(Paragraph(" · ".join(meta_parts), meta_style))
+    story.append(tbl)
+    story.append(Spacer(1, 12))
 
-            if it.get("summary"):
-                story.append(Paragraph(escape(it["summary"]), body_style))
+    # Linkverzeichnis
+    story.append(Paragraph("Links zu allen Artikeln", styles["Heading2"]))
+    story.append(Spacer(1, 4))
 
-            if it.get("url"):
-                story.append(
-                    Paragraph(
-                        f"<link href='{it['url']}' color='blue'>{escape(it['url'])}</link>",
-                        link_style,
-                    )
-                )
-
-            story.append(Spacer(1, 8))
-
-        story.append(Spacer(1, 10))
-
-    # ------------------- 2) WEITERE ERWÄHNUNGEN (DE) -------------------
-    if de_rest:
-        story.append(Paragraph("Weitere Erwähnungen – Deutschland", section_style))
-        story.append(
-            Paragraph(
-                "Ausgewählte weitere Kaufland-Artikel mit geringerer Priorität.",
-                meta_style,
-            )
-        )
-        story.append(Spacer(1, 6))
-
-        for idx, it in enumerate(de_rest, start=1):
-            story.append(
-                Paragraph(f"{idx}. {escape(it['title'])}", article_title_style)
-            )
-            meta_parts = [escape(it.get("source", ""))]
-            if it.get("type"):
-                meta_parts.append(escape(it["type"]))
-            story.append(Paragraph(" · ".join(meta_parts), meta_style))
-
-            if it.get("summary"):
-                story.append(Paragraph(escape(it["summary"]), body_style))
-
-            if it.get("url"):
-                story.append(
-                    Paragraph(
-                        f"<link href='{it['url']}' color='blue'>{escape(it['url'])}</link>",
-                        link_style,
-                    )
-                )
-
-            story.append(Spacer(1, 6))
-
-        story.append(Spacer(1, 10))
-
-    # ------------------- 3) INTERNATIONAL -------------------
-    if intl_items:
-        story.append(Paragraph("International – virale Erwähnungen", section_style))
-        story.append(
-            Paragraph(
-                "Ausgewählte internationale / nicht-deutsche Quellen zu Kaufland, "
-                "z.B. globale Branchen-Trends oder überregionale Berichterstattung.",
-                meta_style,
-            )
-        )
-        story.append(Spacer(1, 6))
-
-        for idx, it in enumerate(intl_items, start=1):
-            story.append(
-                Paragraph(f"{idx}. {escape(it['title'])}", article_title_style)
-            )
-            meta_parts = [escape(it.get("source", ""))]
-            if it.get("type"):
-                meta_parts.append(escape(it["type"]))
-            story.append(Paragraph(" · ".join(meta_parts), meta_style))
-
-            if it.get("summary"):
-                story.append(Paragraph(escape(it["summary"]), body_style))
-
-            if it.get("url"):
-                story.append(
-                    Paragraph(
-                        f"<link href='{it['url']}' color='blue'>{escape(it['url'])}</link>",
-                        link_style,
-                    )
-                )
-
-            story.append(Spacer(1, 6))
+    for idx, item in enumerate(all_items, start=1):
+        url = item["url"]
+        p = Paragraph(f"[{idx}] {url}", normal)
+        story.append(p)
 
     doc.build(story)
 
@@ -303,6 +228,7 @@ def build_pdf(filename, de_top, de_rest, intl_items):
 
 
 def send_via_resend(subject, html, pdf_name):
+    """Odešle e-mail přes Resend API s PDF přílohou."""
     if not RESEND_API_KEY:
         raise RuntimeError("RESEND_API_KEY env variable is missing.")
     if not EMAIL_FROM:
@@ -322,7 +248,7 @@ def send_via_resend(subject, html, pdf_name):
         "html": html,
         "attachments": [
             {
-                "filename": os.path.basename(pdf_name),
+                "filename": pdf_name,
                 "content": pdf_b64,
             }
         ],
@@ -362,30 +288,39 @@ def send_via_resend(subject, html, pdf_name):
 
 
 def main():
-    # 1) NEWS
-    all_items = fetch_news()
-    de_items, intl_items = split_de_intl(all_items)
+    # 1) načtení a seřazení news
+    items = fetch_news()
 
-    de_top = de_items[:MAX_TOP]
-    de_rest = de_items[MAX_TOP:]
+    # 2) rozdělení pro e-mail (bez duplicit URL)
+    top_de, other_de, intl = split_for_email(items, MAX_TOP)
 
-    # 2) Google Reviews (zatím stub)
-    reviews = get_google_reviews_data()
+    # 3) data pro PDF – v pořadí podle score (items je už sorted)
+    #    zároveň bez duplicit
+    seen = set()
+    all_for_pdf = []
+    for it in items:
+        if it["url"] in seen:
+            continue
+        seen.add(it["url"])
+        all_for_pdf.append(it)
 
-    # 3) Načti HTML šablonu emailu
+    # 4) reviews – zatím prázdné (pilotmodus)
+    reviews = []
+
+    # 5) načtení HTML šablony
     with open("email_template.html", "r", encoding="utf-8") as f:
         template_str = f.read()
 
-    # === 1) Executive summary (DE) ===
+    # === Executive summary (zatím ručně, DE text) ===
     executive_summary_html = """
-<p><strong>Insight:</strong> Kuratierte Top-Schlagzeilen (1–10) mit weiteren Erwähnungen und internationalen Hinweisen.</p>
-<p><strong>Implikation:</strong> Schneller Überblick über Relevanz, Risiko und regionale Unterschiede in einem täglichen Briefing.</p>
-<p><strong>Aktion:</strong> Google Reviews & Social Listening werden schrittweise angebunden; Alerts bei auffälligen Entwicklungen.</p>
+<p><strong>Insight:</strong> Kuratierte Top-Schlagzeilen (1–10) für Deutschland; weitere Erwähnungen unten.</p>
+<p><strong>Implikation:</strong> Schneller Überblick in einem E-Mail; regionale Unterschiede sind sofort erkennbar.</p>
+<p><strong>Aktion:</strong> Google Reviews werden im Pilotmodus beobachtet; Alerts bei Auffälligkeiten folgen.</p>
 """.strip()
 
-    # === 2) Top headlines (DE) – HTML pro e-mail ===
+    # === Top Schlagzeilen (DE) ===
     top_items_html = []
-    for i, it in enumerate(de_top, start=1):
+    for i, it in enumerate(top_de, start=1):
         meta_parts = []
         if it.get("source"):
             meta_parts.append(escape(it["source"]))
@@ -404,7 +339,47 @@ def main():
 </li>""".strip()
         )
 
-    # === 3) Google Reviews tabulka (zatím vysvětlující placeholder) ===
+    # === Virale Erwähnungen (DE – zbytek) ===
+    other_de_html = []
+    for it in other_de:
+        meta_parts = []
+        if it.get("source"):
+            meta_parts.append(escape(it["source"]))
+        if it.get("type"):
+            meta_parts.append(escape(it["type"]))
+        meta = " · ".join(meta_parts)
+        other_de_html.append(
+            f"""
+<li class="item">
+  <div class="rank">•</div>
+  <div>
+    <a href="{it['url']}">{escape(it['title'])}</a>
+    <div class="meta">{meta}</div>
+  </div>
+</li>""".strip()
+        )
+
+    # === International – Virale Erwähnungen ===
+    international_items_html = []
+    for it in intl:
+        meta_parts = []
+        if it.get("source"):
+            meta_parts.append(escape(it["source"]))
+        if it.get("type"):
+            meta_parts.append(escape(it["type"]))
+        meta = " · ".join(meta_parts)
+        international_items_html.append(
+            f"""
+<li class="item">
+  <div class="rank">•</div>
+  <div>
+    <a href="{it['url']}">{escape(it['title'])}</a>
+    <div class="meta">{meta}</div>
+  </div>
+</li>""".strip()
+        )
+
+    # === Google Reviews placeholder ===
     review_rows = []
     for r in (reviews or []):
         delta = r.get("delta")
@@ -423,61 +398,39 @@ def main():
     if not review_rows:
         review_rows = [
             """<tr><td colspan="5" class="muted">
-Aktuell noch kein automatisiertes Google-Reviews-Monitoring angebunden.
-Empfehlung (nächster Ausbauschritt): Anzeige der Filialen mit den meisten neuen Bewertungen (24h),
-stärkster Veränderung der Ø-Bewertung sowie auffälligen Häufungen negativer/positiver Reviews.
+Keine auffälligen 24h-Veränderungen (Pilotmodus). Aktivierbar via SerpAPI.
 </td></tr>"""
         ]
 
     reviews_note = "Δ = Veränderung der Ø-Bewertung in den letzten 24 Stunden."
 
-    # === 4) International seznam ===
-    international_items_html = []
-    for it in (intl_items or []):
-        meta_parts = []
-        if it.get("source"):
-            meta_parts.append(escape(it["source"]))
-        if it.get("type"):
-            meta_parts.append(escape(it["type"]))
-        meta = " · ".join(meta_parts)
+    # === Urgent / Boulevard bloky – zatím prázdné ===
+    urgent_block_html = ""
+    rumors_block_html = ""
 
-        international_items_html.append(
-            f"""
-<li class="item">
-  <div class="rank">•</div>
-  <div>
-    <a href="{it['url']}">{escape(it['title'])}</a>
-    <div class="meta">{meta}</div>
-  </div>
-</li>""".strip()
-        )
-
-    if not international_items_html:
-        international_items_html.append(
-            "<li class='item'><div>Heute keine relevanten internationalen Erwähnungen.</div></li>"
-        )
-
-    # === 5) Dosazení do HTML šablony (bez .format, bezpečné replace) ===
+    # === Dosazení do HTML šablony (bez .format, ruční replace) ===
     html = template_str
     replacements = {
         "{date_str}": date_de(TIMEZONE),
         "{tz}": TIMEZONE,
         "{recipient}": EMAIL_TO or "",
         "{executive_summary_html}": executive_summary_html,
-        "{top_count}": str(len(de_top)),
+        "{top_count}": str(len(top_de)),
         "{top_headlines_html}": "\n".join(top_items_html),
+        "{other_de_html}": "\n".join(other_de_html),
         "{reviews_table_rows_html}": "\n".join(review_rows),
         "{reviews_note}": reviews_note,
-        "{urgent_block_html}": "",  # budoucí blok pro echte Alerts
-        "{rumors_block_html}": "",  # budoucí blok pro Boulevard / Spekulation
+        "{urgent_block_html}": urgent_block_html,
+        "{rumors_block_html}": rumors_block_html,
         "{international_html}": "\n".join(international_items_html),
     }
+
     for key, val in replacements.items():
         html = html.replace(key, val)
 
-    # === 6) PDF + odeslání ===
+    # === PDF + odeslání ===
     pdf_name = f"DE_monitoring_privat_{datetime.now().strftime('%Y-%m-%d')}.pdf"
-    build_pdf(pdf_name, de_top, de_rest, intl_items)
+    build_pdf(pdf_name, all_for_pdf, reviews)
 
     subject = f"📰 Kaufland Media & Review Briefing | {date_de(TIMEZONE)}"
     send_via_resend(subject, html, pdf_name)
