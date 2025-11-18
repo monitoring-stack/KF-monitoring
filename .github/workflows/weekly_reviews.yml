@@ -1,1 +1,6 @@
+name: Kaufland Weekly Reviews
+on:
+  schedule:
+    - cron: "25 5 * * 1"
+  workflow_dispatch: {}
 
