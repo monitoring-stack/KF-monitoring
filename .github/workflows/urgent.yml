@@ -1,1 +1,39 @@
+name: Kaufland Urgent Alerts
+
+on:
+  # běh každých 30 minut (můžeš změnit podle potřeby)
+  schedule:
+    - cron: "*/30 * * * *"
+  # možnost ručního spuštění z GitHub Actions
+  workflow_dispatch: {}
+
+jobs:
+  urgent-alerts:
+    runs-on: ubuntu-latest
+
+    env:
+      TIMEZONE: Europe/Berlin
+      RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+      EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+      EMAIL_TO: ${{ secrets.EMAIL_TO }}
+      CC: ${{ secrets.CC }}
+      BCC: ${{ secrets.BCC }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run urgent watcher
+        run: |
+          python urgent_watcher.py
 
