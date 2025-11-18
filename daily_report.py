@@ -1,5 +1,3 @@
-
-
 import os
 import json
 import base64
@@ -28,7 +26,7 @@ TIMEZONE = os.getenv("TIMEZONE", "Europe/Berlin")
 
 # Resend
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
-EMAIL_FROM = os.getenv("EMAIL_FROM")          # z GitHub Secrets, např. "Kaufland Monitoring <kaufland.monitoring@gmail.com>"
+EMAIL_FROM = os.getenv("EMAIL_FROM")          # např. "Kaufland Monitoring <kaufland.monitoring@gmail.com>"
 EMAIL_TO = os.getenv("EMAIL_TO")              # hlavní příjemce (Stefan)
 CC = os.getenv("CC")
 BCC = os.getenv("BCC")
@@ -36,10 +34,15 @@ BCC = os.getenv("BCC")
 # v mailu chceme 15 hlavních článků
 MAX_TOP = int(os.getenv("MAX_TOP", "15"))
 
-# volitelný vstup pro Google Reviews (medium varianta)
-# REVIEWS_JSON = JSON pole objektů:
-# [{ "region": "...", "store": "...", "avg": 4.2, "delta": -0.1, "count_24h": 12, "flag": "negativer Trend" }, ...]
+# Google Reviews – vstupní JSON pro všechny filiálky (all stores)
+# očekává se seznam objektů:
+# { "region": "...", "store": "...", "avg_today": 4.2, "avg_prev": 4.5, "count_24h": 12 }
 REVIEWS_JSON = os.getenv("REVIEWS_JSON", "[]")
+
+# prahy pro „odchylky“
+MIN_REVIEWS_24H = int(os.getenv("MIN_REVIEWS_24H", "3"))
+MIN_DELTA = float(os.getenv("MIN_DELTA", "0.2"))
+MAX_REVIEWS_ROWS = int(os.getenv("MAX_REVIEWS_ROWS", "5"))
 
 FEEDS = [
     "https://news.google.com/rss/search?q=Kaufland+Deutschland&hl=de&gl=DE&ceid=DE:de",
@@ -48,10 +51,7 @@ FEEDS = [
 ]
 
 
-# ================== NEWS FETCH ==================
-
-
-
+# ================== NEWS (posledních 24 h) ==================
 
 
 def fetch_news():
@@ -59,13 +59,12 @@ def fetch_news():
     Načte články z Google News, vyčistí summary, odfiltruje jen zmínky Kauflandu
     a seřadí podle score (desc).
 
-    NAVÍC:
-    - bere jen články z posledních 24 hodin (podle published/updated v RSS)
+    Navíc:
+      - bere pouze články z posledních ~24 hodin (podle published/updated v RSS).
     """
     seen = set()
     items = []
 
-    # časový řez – posledních 24 h
     now_utc = datetime.now(timezone.utc)
     cutoff = now_utc - timedelta(days=1)
 
@@ -114,7 +113,7 @@ def fetch_news():
                     "type": typ,
                     "score": score,
                     "why": "relevant" if score >= 4 else "beobachten",
-                 }
+                }
             )
 
     # seřadit podle score (nejdůležitější nahoře)
@@ -122,18 +121,17 @@ def fetch_news():
     return items
 
 
-# ================== GOOGLE REVIEWS (MIN + MEDIUM) ==================
+# ================== GOOGLE REVIEWS – odchylky (all stores) ==================
 
 
 def get_google_reviews_data():
     """
-    MIN varianta:
-      - pokud REVIEWS_JSON není vyplněné → vrátí prázdný list → zobrazí se vysvětlující řádek.
+    Z REVIEWS_JSON vezme data pro VŠECHNY filiálky a vrátí jen ty, kde:
+      - count_24h >= MIN_REVIEWS_24H nebo
+      - abs(delta) >= MIN_DELTA
 
-    MEDIUM varianta:
-      - pokud REVIEWS_JSON obsahuje JSON seznam objektů:
-        {region, store, avg, delta, count_24h, flag}
-        → seřadí podle 'priority' a vrátí TOP 5.
+    Vrací list dictů ve tvaru:
+      { region, store, avg, delta, count_24h, flag }
     """
     try:
         raw = REVIEWS_JSON.strip()
@@ -145,14 +143,49 @@ def get_google_reviews_data():
     except Exception:
         return []
 
-    def prio(r):
-        delta = abs(r.get("delta") or 0.0)
-        count = r.get("count_24h") or 0
-        # jednoduché skóre: velká změna ratingu + hodně nových recenzí
-        return delta * 10 + count
+    anomalies = []
+    for r in data:
+        try:
+            region = r.get("region", "–")
+            store = r.get("store", "–")
+            avg_today = float(r.get("avg_today", 0.0))
+            avg_prev = float(r.get("avg_prev", avg_today))
+            count_24h = int(r.get("count_24h", 0))
+        except Exception:
+            continue
 
-    data_sorted = sorted(data, key=prio, reverse=True)
-    return data_sorted[:5]
+        delta = avg_today - avg_prev
+        if count_24h < MIN_REVIEWS_24H and abs(delta) < MIN_DELTA:
+            # běžný šum, ignorujeme
+            continue
+
+        # jednoduché "severity"
+        severity = abs(delta) * 10.0 + count_24h
+
+        # flag text
+        if delta < 0:
+            flag = "Bewertungsabfall, viele neue kritische Reviews"
+        elif delta > 0:
+            flag = "Deutlich positiveres Feedback als zuvor"
+        else:
+            flag = "Auffälliger Anstieg der Review-Anzahl"
+
+        anomalies.append(
+            {
+                "region": region,
+                "store": store,
+                "avg": round(avg_today, 2),
+                "delta": round(delta, 2),
+                "count_24h": count_24h,
+                "flag": flag,
+                "severity": severity,
+            }
+        )
+
+    # seřadíme podle severity
+    anomalies.sort(key=lambda x: x["severity"], reverse=True)
+    # vrátíme jen top N
+    return anomalies[:MAX_REVIEWS_ROWS]
 
 
 # ================== TOPIC KLASIFIKACE PRO PDF ==================
@@ -433,7 +466,7 @@ def send_via_resend(subject, html, pdf_name):
 
 
 def main():
-    # 1) Načtení a seřazení news
+    # 1) Načtení a seřazení news (24 h)
     items_raw = fetch_news()
 
     # 2) Dedup URL + pořadí podle score
@@ -448,7 +481,7 @@ def main():
     # Top 15 do mailu
     top_items = all_items[:MAX_TOP]
 
-    # Google reviews data
+    # Google reviews data (anomalie přes všechny filiálky)
     reviews = get_google_reviews_data()
 
     # 3) Načtení HTML šablony
@@ -457,9 +490,9 @@ def main():
 
     # === Executive summary (DE) ===
     executive_summary_html = """
-<p><strong>Insight:</strong> 15 kuratierte, virale Kaufland-Erwähnungen pro Tag – nach internem Score geordnet, im PDF zusätzlich nach Themen gruppiert.</p>
-<p><strong>Implikation:</strong> Schneller Überblick über Themen, Risiken und Chancen direkt im E-Mail; detaillierte thematische Übersicht im PDF.</p>
-<p><strong>Aktion:</strong> Google Reviews sind im Pilotmodus angebunden; Filialdaten können über REVIEWS_JSON ergänzt und priorisiert werden.</p>
+<p><strong>Insight:</strong> 15 kuratierte, virale Kaufland-Erwähnungen der letzten 24 Stunden – nach internem Score geordnet; im PDF zusätzlich nach Themen gruppiert.</p>
+<p><strong>Implikation:</strong> Schneller Überblick über Themen, Risiken und Chancen im E-Mail; detaillierte thematische Übersicht im PDF.</p>
+<p><strong>Aktion:</strong> Google Reviews aller Filialen werden automatisch auf auffällige Veränderungen (Anzahl & Bewertung) geprüft; die wichtigsten Ausreißer werden täglich hervorgehoben.</p>
 """.strip()
 
     # === Virale Erwähnungen – Top 15 do mailu ===
@@ -502,12 +535,14 @@ def main():
     if not review_rows:
         review_rows = [
             """<tr><td colspan="5" class="muted">
-Noch keine Filial-spezifischen Daten hinterlegt (Pilotmodus).
-Über REVIEWS_JSON können Filialen mit vielen neuen oder auffälligen Bewertungen eingebunden werden.
+Noch keine auffälligen Veränderungen in den vorliegenden Google-Reviews-Daten (Pilotmodus oder stabile Lage).
 </td></tr>"""
         ]
 
-    reviews_note = "Δ = Veränderung der Ø-Bewertung in den letzten 24 Stunden (sofern Daten vorliegen)."
+    reviews_note = (
+        f"Gefiltert nach Filialen mit ≥ {MIN_REVIEWS_24H} neuen Reviews "
+        f"oder ≥ {MIN_DELTA} Veränderung der Ø-Bewertung (24h)."
+    )
 
     # === Urgent / Rumors – zatím prázdné (řeší urgent_watcher) ===
     urgent_block_html = ""
@@ -526,7 +561,6 @@ Noch keine Filial-spezifischen Daten hinterlegt (Pilotmodus).
         "{reviews_note}": reviews_note,
         "{urgent_block_html}": urgent_block_html,
         "{rumors_block_html}": rumors_block_html,
-        # tyto placeholdery v aktuální šabloně nepoužíváš, ale replace je nevadí
         "{international_html}": "",
         "{other_de_html}": "",
     }
