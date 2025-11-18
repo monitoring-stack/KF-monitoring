@@ -51,13 +51,21 @@ FEEDS = [
 # ================== NEWS FETCH ==================
 
 
+
 def fetch_news():
     """
     Načte články z Google News, vyčistí summary, odfiltruje jen zmínky Kauflandu
     a seřadí podle score (desc).
+
+    NAVÍC:
+    - bere jen články z posledních 24 hodin (podle published/updated v RSS)
     """
     seen = set()
     items = []
+
+    # časový řez – posledních 24 h
+    now_utc = datetime.now(timezone.utc)
+    cutoff = now_utc - timedelta(days=1)
 
     for url in FEEDS:
         d = feedparser.parse(url)
@@ -66,6 +74,24 @@ def fetch_news():
             if link in seen:
                 continue
             seen.add(link)
+
+            # datum publikace/aktualizace z RSS (pokud chybí, bereme článek jako "čerstvý")
+            pub_struct = getattr(e, "published_parsed", None) or getattr(
+                e, "updated_parsed", None
+            )
+            if pub_struct is not None:
+                pub_dt = datetime(
+                    pub_struct.tm_year,
+                    pub_struct.tm_mon,
+                    pub_struct.tm_mday,
+                    pub_struct.tm_hour,
+                    pub_struct.tm_min,
+                    pub_struct.tm_sec,
+                    tzinfo=timezone.utc,
+                )
+                if pub_dt < cutoff:
+                    # starší než 24 h → přeskočit
+                    continue
 
             title = e.title or ""
             desc_html = getattr(e, "summary", "") or ""
