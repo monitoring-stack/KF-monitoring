@@ -1,8 +1,5 @@
 
 
-
-
-
 import os
 import json
 import base64
@@ -31,8 +28,8 @@ TIMEZONE = os.getenv("TIMEZONE", "Europe/Berlin")
 
 # Resend
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
-EMAIL_FROM = os.getenv("EMAIL_FROM")          # např. "Kaufland Monitoring <kaufland.monitoring@gmail.com>"
-EMAIL_TO = os.getenv("EMAIL_TO")              # hlavní příjemce
+EMAIL_FROM = os.getenv("EMAIL_FROM")          # z GitHub Secrets, např. "Kaufland Monitoring <kaufland.monitoring@gmail.com>"
+EMAIL_TO = os.getenv("EMAIL_TO")              # hlavní příjemce (Stefan)
 CC = os.getenv("CC")
 BCC = os.getenv("BCC")
 
@@ -130,6 +127,91 @@ def get_google_reviews_data():
     return data_sorted[:5]
 
 
+# ================== TOPIC KLASIFIKACE PRO PDF ==================
+
+TOPIC_KEYWORDS = {
+    "Rückruf / Sicherheit": [
+        "rückruf",
+        "warnung",
+        "produktsicherheit",
+        "gefährdung",
+        "gesundheitsgefahr",
+        "verunreinigung",
+    ],
+    "Hygiene / Qualität": [
+        "hygiene",
+        "verschmutzt",
+        "schimmel",
+        "ekel",
+        "verdorben",
+        "qualität",
+        "abgelaufen",
+        "abgelaufene",
+    ],
+    "Preise / Aktionen": [
+        "preis",
+        "preise",
+        "rabatt",
+        "rabatte",
+        "angebot",
+        "angebote",
+        "aktion",
+        "aktionen",
+        "billig",
+        "teuer",
+        "inflation",
+        "günstig",
+    ],
+    "Filialen / Expansion": [
+        "neue filiale",
+        "filiale eröffnet",
+        "eröffnung",
+        "neuer markt",
+        "umbau",
+        "standort",
+        "expansion",
+        "verkaufsfläche",
+    ],
+    "Personal / Arbeitsbedingungen": [
+        "mitarbeiter",
+        "arbeitnehmer",
+        "streik",
+        "tarif",
+        "gehalt",
+        "lohn",
+        "arbeitsbedingungen",
+        "personal",
+        "team",
+    ],
+    "Reputation / Medien": [
+        "shitstorm",
+        "boykott",
+        "kritik",
+        "skandal",
+        "image",
+        "pr-kampagne",
+        "werbung",
+        "kampagne",
+        "social media",
+        "tiktok",
+        "instagram",
+    ],
+}
+
+
+def topic_of(item):
+    """
+    Přiřadí článek do jednoho z témat na základě klíčových slov
+    v titulku + shrnutí. Pokud nic nepasuje, vrátí 'Sonstiges'.
+    """
+    text = (item.get("title", "") + " " + item.get("summary", "")).lower()
+    for topic, kws in TOPIC_KEYWORDS.items():
+        for kw in kws:
+            if kw in text:
+                return topic
+    return "Sonstiges"
+
+
 # ================== PDF – MAGAZINE LAYOUT ==================
 
 
@@ -146,8 +228,8 @@ def shorten_url(url: str, max_len: int = 60) -> str:
 def build_pdf_magazine(filename, items):
     """
     Vytvoří „magazine style“ PDF:
-      - žádná velká tabulka
-      - jedna sekce „Virale Erwähnungen – alle Meldungen“
+      - rozdělení dle témat (Rückruf, Hygiene, Preise, Filialen, Personal, Reputation, Sonstiges)
+      - uvnitř každé sekce články v pořadí podle score (items už jsou seřazené)
       - každý článek jako blok: #, titulek, meta, summary, link (klikací)
     """
     styles = getSampleStyleSheet()
@@ -194,42 +276,68 @@ def build_pdf_magazine(filename, items):
     story.append(Paragraph(date_de(TIMEZONE), meta_style))
     story.append(Spacer(1, 14))
 
-    # Jedna společná sekce – všechny články (seřazeno podle score)
-    story.append(
-        Paragraph("Virale Erwähnungen – alle Meldungen (nach Score sortiert)", h2)
-    )
-    story.append(Spacer(1, 8))
+    # Rozdělení podle témat – zachovává pořadí items (tedy score)
+    buckets = {}
+    for it in items:
+        t = topic_of(it)
+        buckets.setdefault(t, []).append(it)
 
-    for idx, it in enumerate(items, start=1):
-        # Nadpis článku
-        story.append(Paragraph(f"{idx}. {escape(it['title'])}", h3))
+    topics_order = [
+        "Rückruf / Sicherheit",
+        "Hygiene / Qualität",
+        "Preise / Aktionen",
+        "Filialen / Expansion",
+        "Personal / Arbeitsbedingungen",
+        "Reputation / Medien",
+        "Sonstiges",
+    ]
 
-        # Meta informace
-        meta_parts = []
-        if it.get("source"):
-            meta_parts.append(escape(it["source"]))
-        if it.get("type"):
-            meta_parts.append(escape(it["type"]))
-        if it.get("why"):
-            meta_parts.append("Grund: " + escape(it["why"]))
-        if meta_parts:
-            story.append(Paragraph(" · ".join(meta_parts), meta_style))
+    global_idx = 1
 
-        # Shrnutí
-        if it.get("summary"):
-            story.append(Paragraph(escape(it["summary"]), body_style))
+    for topic in topics_order:
+        topic_items = buckets.get(topic, [])
+        if not topic_items:
+            continue
 
-        # Klikací odkaz
-        if it.get("url"):
-            short = shorten_url(it["url"])
+        # Nadpis sekce
+        story.append(Paragraph(topic, h2))
+        story.append(Spacer(1, 8))
+
+        for it in topic_items:
+            # Nadpis článku
             story.append(
-                Paragraph(
-                    f"<link href='{it['url']}' color='blue'>{escape(short)}</link>",
-                    link_style,
-                )
+                Paragraph(f"{global_idx}. {escape(it['title'])}", h3)
             )
 
-        story.append(Spacer(1, 10))
+            # Meta informace
+            meta_parts = []
+            if it.get("source"):
+                meta_parts.append(escape(it["source"]))
+            if it.get("type"):
+                meta_parts.append(escape(it["type"]))
+            if it.get("why"):
+                meta_parts.append("Grund: " + escape(it["why"]))
+            if meta_parts:
+                story.append(Paragraph(" · ".join(meta_parts), meta_style))
+
+            # Shrnutí
+            if it.get("summary"):
+                story.append(Paragraph(escape(it["summary"]), body_style))
+
+            # Klikací odkaz
+            if it.get("url"):
+                short = shorten_url(it["url"])
+                story.append(
+                    Paragraph(
+                        f"<link href='{it['url']}' color='blue'>{escape(short)}</link>",
+                        link_style,
+                    )
+                )
+
+            story.append(Spacer(1, 10))
+            global_idx += 1
+
+        story.append(Spacer(1, 16))
 
     doc.build(story)
 
@@ -321,8 +429,8 @@ def main():
 
     # === Executive summary (DE) ===
     executive_summary_html = """
-<p><strong>Insight:</strong> 15 kuratierte, virale Kaufland-Erwähnungen pro Tag – nach internem Score geordnet.</p>
-<p><strong>Implikation:</strong> Schneller Überblick über Themen, Risiken und Chancen direkt im E-Mail; vollständige Übersicht im PDF.</p>
+<p><strong>Insight:</strong> 15 kuratierte, virale Kaufland-Erwähnungen pro Tag – nach internem Score geordnet, im PDF zusätzlich nach Themen gruppiert.</p>
+<p><strong>Implikation:</strong> Schneller Überblick über Themen, Risiken und Chancen direkt im E-Mail; detaillierte thematische Übersicht im PDF.</p>
 <p><strong>Aktion:</strong> Google Reviews sind im Pilotmodus angebunden; Filialdaten können über REVIEWS_JSON ergänzt und priorisiert werden.</p>
 """.strip()
 
@@ -390,7 +498,7 @@ Noch keine Filial-spezifischen Daten hinterlegt (Pilotmodus).
         "{reviews_note}": reviews_note,
         "{urgent_block_html}": urgent_block_html,
         "{rumors_block_html}": rumors_block_html,
-        # tyto placeholdery v nové šabloně nejsou, ale replace je bezpečný
+        # tyto placeholdery v aktuální šabloně nepoužíváš, ale replace je nevadí
         "{international_html}": "",
         "{other_de_html}": "",
     }
