@@ -52,6 +52,8 @@ FEEDS = [
 
 
 
+
+
 def fetch_news():
     """
     Načte články z Google News, vyčistí summary, odfiltruje jen zmínky Kauflandu
@@ -112,7 +114,7 @@ def fetch_news():
                     "type": typ,
                     "score": score,
                     "why": "relevant" if score >= 4 else "beobachten",
-                }
+                 }
             )
 
     # seřadit podle score (nejdůležitější nahoře)
