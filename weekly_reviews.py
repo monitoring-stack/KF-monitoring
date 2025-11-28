@@ -3,15 +3,11 @@ import json
 import base64
 import urllib.request
 import urllib.error
-from html import escape
 from datetime import datetime
+from html import escape as html_escape
 
 from reportlab.lib.pagesizes import A4
-from reportlab.platypus import (
-    SimpleDocTemplate,
-    Paragraph,
-    Spacer,
-)
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
 
@@ -22,39 +18,49 @@ from helpers import date_de
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Berlin")
 
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
-EMAIL_FROM = os.getenv("EMAIL_FROM")          # např. "Kaufland Monitoring <kaufland.monitoring@gmail.com>"
+EMAIL_FROM = os.getenv("EMAIL_FROM")          # např. "Kaufland Monitoring <kaufland.monitoring@resend.dev>"
 EMAIL_TO = os.getenv("EMAIL_TO")              # hlavní příjemce (Stefan)
 CC = os.getenv("CC")
 BCC = os.getenv("BCC")
 
-# WEEKLY_REVIEWS_JSON = data pro VŠECHNY filiálky za 7 dní
-# očekává se seznam objektů:
-# {
-#   "region": "NRW",
-#   "store": "Kaufland Köln-Mülheim",
-#   "avg_week": 3.6,
-#   "avg_prev_week": 3.9,
-#   "count_week": 42,
-#   "count_prev_week": 30
-# }
+# WEEKLY_REVIEWS_JSON = data pro všechny filiálky
+# očekávaný formát (list slovníků):
+# [
+#   {
+#     "region": "Süd",
+#     "store": "Kaufland München-Sendling",
+#     "new_7": 12,
+#     "avg_7": 3.9,
+#     "neg_7": 5,
+#     "new_30": 34,
+#     "avg_30": 4.1,
+#     "neg_30": 9,
+#     "new_90": 80,
+#     "avg_90": 4.2,
+#     "neg_90": 20
+#   },
+#   ...
+# ]
 WEEKLY_REVIEWS_JSON = os.getenv("WEEKLY_REVIEWS_JSON", "[]")
 
-MIN_WEEKLY_COUNT = int(os.getenv("MIN_WEEKLY_COUNT", "5"))       # min. nových recenzí za týden
-MIN_WEEKLY_DELTA = float(os.getenv("MIN_WEEKLY_DELTA", "0.2"))   # min. změna ratingu, aby to bylo zajímavé
-MAX_WEEKLY_ROWS = int(os.getenv("MAX_WEEKLY_ROWS", "10"))        # max. řádků v každé tabulce
+# minimální prahy – můžeš kdykoli upravit
+MIN_NEW_7 = int(os.getenv("MIN_NEW_7", "3"))          # min. nových reviews za 7 dní, aby filiálka vstoupila do hodnocení
+MIN_NEW_30 = int(os.getenv("MIN_NEW_30", "5"))
+MIN_NEW_90 = int(os.getenv("MIN_NEW_90", "10"))
+
+# kolik řádků chceme ukázat v top seznamech
+MAX_ROWS_TOP = int(os.getenv("MAX_ROWS_TOP", "7"))
 
 
-# ================== DATA Z WEEKLY_REVIEWS_JSON ==================
+# ================== DATOVÉ FUNKCE ==================
 
 
-def load_weekly_reviews():
+def load_weekly_rows():
     """
-    Načte WEEKLY_REVIEWS_JSON a vrátí list dictů:
-      { region, store, avg_now, avg_prev, delta_avg, count_now, count_prev, delta_count }
-    Používá se pro všechny další výpočty.
+    Načte WEEKLY_REVIEWS_JSON a vrátí list normalizovaných záznamů.
     """
     try:
-        raw = WEEKLY_REVIEWS_JSON.strip()
+        raw = (WEEKLY_REVIEWS_JSON or "").strip()
         if not raw or raw == "[]":
             return []
         data = json.loads(raw)
@@ -68,78 +74,216 @@ def load_weekly_reviews():
         try:
             region = r.get("region", "–")
             store = r.get("store", "–")
-            avg_now = float(r.get("avg_week", 0.0))
-            avg_prev = float(r.get("avg_prev_week", avg_now))
-            count_now = int(r.get("count_week", 0))
-            count_prev = int(r.get("count_prev_week", 0))
+
+            new_7 = int(r.get("new_7", 0))
+            avg_7 = float(r.get("avg_7", 0.0)) if new_7 > 0 else 0.0
+            neg_7 = int(r.get("neg_7", 0))
+
+            new_30 = int(r.get("new_30", 0))
+            avg_30 = float(r.get("avg_30", 0.0)) if new_30 > 0 else 0.0
+            neg_30 = int(r.get("neg_30", 0))
+
+            new_90 = int(r.get("new_90", 0))
+            avg_90 = float(r.get("avg_90", 0.0)) if new_90 > 0 else 0.0
+            neg_90 = int(r.get("neg_90", 0))
         except Exception:
-            # nekorektní záznam, přeskočit
+            # špatně strukturovaný záznam – přeskočíme
             continue
 
-        delta_avg = avg_now - avg_prev
-        delta_count = count_now - count_prev
+        # poměry
+        neg_share_7 = (neg_7 / new_7) if new_7 > 0 else 0.0
+        neg_share_30 = (neg_30 / new_30) if new_30 > 0 else 0.0
+        neg_share_90 = (neg_90 / new_90) if new_90 > 0 else 0.0
 
         rows.append(
             {
                 "region": region,
                 "store": store,
-                "avg_now": round(avg_now, 2),
-                "avg_prev": round(avg_prev, 2),
-                "delta_avg": round(delta_avg, 2),
-                "count_now": count_now,
-                "count_prev": count_prev,
-                "delta_count": delta_count,
+                "new_7": new_7,
+                "avg_7": round(avg_7, 2),
+                "neg_7": neg_7,
+                "neg_share_7": round(neg_share_7, 3),
+                "new_30": new_30,
+                "avg_30": round(avg_30, 2),
+                "neg_30": neg_30,
+                "neg_share_30": round(neg_share_30, 3),
+                "new_90": new_90,
+                "avg_90": round(avg_90, 2),
+                "neg_90": neg_90,
+                "neg_share_90": round(neg_share_90, 3),
             }
         )
-
     return rows
 
 
-def split_views(rows):
+def compute_risk_scores(rows):
     """
-    Z jednoho seznamu udělá tři pohledy:
-      - top_neg: největší pokles Ø ratingu
-      - top_pos: největší nárůst Ø ratingu
-      - top_vol: nejvíce nových recenzí
-    Všude se filtruje podle MIN_WEEKLY_COUNT / MIN_WEEKLY_DELTA.
+    Spočítá jednoduché risk-score 0–100 pro každou filiálku.
+    Skóre je kombinace:
+      - podílu negativních recenzí (7 dní)
+      - poklesu průměru (7 vs 30/90 dní)
+      - nárůstu počtu recenzí (7 dní vs. průměr všech)
     """
-    neg = [
-        r
-        for r in rows
-        if r["count_now"] >= MIN_WEEKLY_COUNT and r["delta_avg"] <= -MIN_WEEKLY_DELTA
-    ]
-    pos = [
-        r
-        for r in rows
-        if r["count_now"] >= MIN_WEEKLY_COUNT and r["delta_avg"] >= MIN_WEEKLY_DELTA
-    ]
-    vol = [r for r in rows if r["count_now"] >= MIN_WEEKLY_COUNT]
+    if not rows:
+        return []
 
-    neg_sorted = sorted(neg, key=lambda x: x["delta_avg"])[:MAX_WEEKLY_ROWS]
-    pos_sorted = sorted(pos, key=lambda x: x["delta_avg"], reverse=True)[:MAX_WEEKLY_ROWS]
-    vol_sorted = sorted(vol, key=lambda x: x["count_now"], reverse=True)[:MAX_WEEKLY_ROWS]
+    # průměrný počet nových recenzí za 7 dní přes všechny filiálky (pro relativní zátěž)
+    avg_new7_all = sum(r["new_7"] for r in rows) / max(len(rows), 1)
 
-    return neg_sorted, pos_sorted, vol_sorted
+    scored = []
+    for r in rows:
+        new_7 = r["new_7"]
+        avg_7 = r["avg_7"]
+        avg_30 = r["avg_30"]
+        avg_90 = r["avg_90"]
+        neg_share_7 = r["neg_share_7"]
+
+        # 1) negativní podíl – maximum 40 bodů
+        neg_component = 0.0
+        # nad 20 % začínáme zvyšovat, nad 50 % max
+        if new_7 >= MIN_NEW_7:
+            if neg_share_7 <= 0.2:
+                neg_component = 0.0
+            elif neg_share_7 >= 0.5:
+                neg_component = 40.0
+            else:
+                # lineární mezi 20 % a 50 %
+                neg_component = 40.0 * (neg_share_7 - 0.2) / 0.3
+
+        # 2) pokles ratingu (7 vs 30/90) – max 40 bodů
+        drop_component = 0.0
+        ref_avg = avg_30 if avg_30 > 0 else avg_90
+        if ref_avg > 0 and avg_7 > 0 and new_7 >= MIN_NEW_7:
+            delta = ref_avg - avg_7  # kladné číslo = zhoršení
+            if delta <= 0:
+                drop_component = 0.0
+            elif delta >= 0.7:
+                drop_component = 40.0
+            else:
+                drop_component = 40.0 * (delta / 0.7)
+
+        # 3) nárůst objemu recenzí – max 20 bodů
+        volume_component = 0.0
+        if avg_new7_all > 0 and new_7 >= MIN_NEW_7:
+            rel = new_7 / avg_new7_all  # poměr vůči průměru
+            if rel <= 1.0:
+                volume_component = 0.0
+            elif rel >= 3.0:
+                volume_component = 20.0
+            else:
+                volume_component = 20.0 * (rel - 1.0) / 2.0
+
+        risk = neg_component + drop_component + volume_component
+        if risk > 100.0:
+            risk = 100.0
+
+        out = dict(r)
+        out["risk_score"] = round(risk, 1)
+        scored.append(out)
+
+    return scored
 
 
-# ================== PDF – WEEKLY REVIEW REPORT ==================
+def aggregate_totals(rows):
+    """
+    Celkové souhrny za Německo.
+    """
+    total_new_7 = sum(r["new_7"] for r in rows)
+    total_neg_7 = sum(r["neg_7"] for r in rows)
+    neg_share_7 = (total_neg_7 / total_new_7) if total_new_7 > 0 else 0.0
+
+    total_new_30 = sum(r["new_30"] for r in rows)
+    total_neg_30 = sum(r["neg_30"] for r in rows)
+    neg_share_30 = (total_neg_30 / total_new_30) if total_new_30 > 0 else 0.0
+
+    # vážený průměr Ø ratingu (váha = počet reviews)
+    def weighted_avg(field_avg, field_n):
+        total_weighted = sum(r[field_avg] * r[field_n] for r in rows if r[field_n] > 0)
+        total_n = sum(r[field_n] for r in rows)
+        if total_n == 0:
+            return 0.0
+        return total_weighted / total_n
+
+    avg7_weighted = weighted_avg("avg_7", "new_7")
+    avg30_weighted = weighted_avg("avg_30", "new_30")
+    avg90_weighted = weighted_avg("avg_90", "new_90")
+
+    return {
+        "total_new_7": total_new_7,
+        "total_neg_7": total_neg_7,
+        "neg_share_7": round(neg_share_7, 3),
+        "total_new_30": total_new_30,
+        "total_neg_30": total_neg_30,
+        "neg_share_30": round(neg_share_30, 3),
+        "avg7_weighted": round(avg7_weighted, 2),
+        "avg30_weighted": round(avg30_weighted, 2),
+        "avg90_weighted": round(avg90_weighted, 2),
+    }
 
 
-def build_weekly_pdf(filename, all_rows, neg_rows, pos_rows, vol_rows):
+def aggregate_by_region(rows):
+    """
+    Vytvoří agregace podle regionu.
+    """
+    regions = {}
+    for r in rows:
+        region = r["region"] or "–"
+        bucket = regions.setdefault(
+            region,
+            {
+                "region": region,
+                "total_new_7": 0,
+                "total_neg_7": 0,
+                "total_new_30": 0,
+                "total_neg_30": 0,
+            },
+        )
+        bucket["total_new_7"] += r["new_7"]
+        bucket["total_neg_7"] += r["neg_7"]
+        bucket["total_new_30"] += r["new_30"]
+        bucket["total_neg_30"] += r["neg_30"]
+
+    # dopočítáme podíly
+    for region, aggr in regions.items():
+        total_new_7 = aggr["total_new_7"]
+        total_neg_7 = aggr["total_neg_7"]
+        total_new_30 = aggr["total_new_30"]
+        total_neg_30 = aggr["total_neg_30"]
+
+        aggr["neg_share_7"] = round(
+            (total_neg_7 / total_new_7) if total_new_7 > 0 else 0.0, 3
+        )
+        aggr["neg_share_30"] = round(
+            (total_neg_30 / total_new_30) if total_new_30 > 0 else 0.0, 3
+        )
+
+    # chceme list, seřazený podle počtu nových reviews (7 dní)
+    result = sorted(
+        regions.values(),
+        key=lambda x: x["total_new_7"],
+        reverse=True,
+    )
+    return result
+
+
+# ================== PDF VÝSTUP ==================
+
+
+def build_weekly_pdf(filename, rows, top_neg, top_pos, by_region):
     styles = getSampleStyleSheet()
-
     title_style = styles["Title"]
     h2 = styles["Heading2"]
-    p_style = ParagraphStyle(
+    body = ParagraphStyle(
         "Body",
-        parent=styles["Normal"],
+        parent=styles["BodyText"],
         fontSize=10,
         leading=13,
     )
     small = ParagraphStyle(
         "Small",
-        parent=styles["Normal"],
-        fontSize=8.5,
+        parent=styles["BodyText"],
+        fontSize=8,
+        leading=10,
         textColor="grey",
     )
 
@@ -154,70 +298,82 @@ def build_weekly_pdf(filename, all_rows, neg_rows, pos_rows, vol_rows):
 
     story = []
 
-    # Titulek + datum
-    story.append(
-        Paragraph("Kaufland – Weekly Google Reviews Report (Deutschland)", title_style)
-    )
+    story.append(Paragraph("Kaufland – Weekly Google Reviews (Deutschland)", title_style))
     story.append(Spacer(1, 6))
     story.append(Paragraph(date_de(TIMEZONE), small))
-    story.append(Spacer(1, 8))
+    story.append(Spacer(1, 10))
 
-    # Celkový počet nových recenzí za týden (všechny filiálky dohromady)
-    total_reviews = sum(r["count_now"] for r in all_rows)
-    story.append(
-        Paragraph(
-            f"<strong>Neue Reviews (Woche gesamt):</strong> {total_reviews}",
-            p_style,
-        )
-    )
-    story.append(Spacer(1, 14))
-
-    # Stručný úvod
-    story.append(
-        Paragraph(
-            "Wöchentliche Auswertung der Google-Reviews aller Filialen – Fokus auf Veränderungen in Bewertung und Anzahl der Reviews.",
-            p_style,
-        )
-    )
-    story.append(Spacer(1, 12))
-
-    def section(title, rows, icon):
-        story.append(Paragraph(f"{icon} {title}", h2))
-        story.append(Spacer(1, 6))
-        if not rows:
-            story.append(
-                Paragraph(
-                    "Keine auffälligen Veränderungen für diese Kategorie in dieser Woche.",
-                    small,
-                )
+    # regionální přehled
+    story.append(Paragraph("Regionale Übersicht (7 Tage)", h2))
+    story.append(Spacer(1, 4))
+    if not by_region:
+        story.append(
+            Paragraph(
+                "Noch keine aggregierten Daten nach Regionen vorhanden.",
+                small,
             )
-            story.append(Spacer(1, 10))
-            return
-
-        for r in rows:
-            region_store = f"{escape(r['region'])} – {escape(r['store'])}"
+        )
+    else:
+        for r in by_region:
             txt = (
-                f"<strong>{region_store}</strong><br/>"
-                f"Ø Bewertung: {r['avg_prev']} → {r['avg_now']} "
-                f"({('+' if r['delta_avg'] > 0 else '')}{r['delta_avg']})<br/>"
-                f"Reviews: {r['count_prev']} → {r['count_now']} "
-                f"({('+' if r['delta_count'] > 0 else '')}{r['delta_count']})"
+                f"<strong>{html_escape(r['region'])}</strong>: "
+                f"{r['total_new_7']} neue Reviews (7 Tage), "
+                f"{r['total_neg_7']} davon negativ "
+                f"({round((r['neg_share_7'] * 100), 1)} %)."
             )
-            story.append(Paragraph(txt, p_style))
-            story.append(Spacer(1, 8))
+            story.append(Paragraph(txt, body))
+            story.append(Spacer(1, 3))
+    story.append(Spacer(1, 10))
 
-        story.append(Spacer(1, 14))
+    # top negativní
+    story.append(Paragraph("Top Problemfilialen (höchstes Risiko)", h2))
+    story.append(Spacer(1, 4))
+    if not top_neg:
+        story.append(
+            Paragraph("Keine Filialen mit auffälligem Risiko in dieser Woche.", small)
+        )
+    else:
+        for r in top_neg:
+            txt = (
+                f"<strong>{html_escape(r['store'])}</strong> "
+                f"({html_escape(r['region'])}) – "
+                f"Risk-Score: {r['risk_score']}<br/>"
+                f"Neue Reviews (7 Tage): {r['new_7']} "
+                f"(Ø {r['avg_7']}, "
+                f"{round(r['neg_share_7']*100,1)} % negativ)<br/>"
+                f"30 Tage: {r['new_30']} Reviews, Ø {r['avg_30']} · "
+                f"90 Tage: Ø {r['avg_90']}"
+            )
+            story.append(Paragraph(txt, body))
+            story.append(Spacer(1, 5))
+    story.append(Spacer(1, 10))
 
-    # 3 sekce
-    section("Größter Rückgang der Ø-Bewertung", neg_rows, "🔻")
-    section("Größter Anstieg der Ø-Bewertung", pos_rows, "🔺")
-    section("Filialen mit den meisten neuen Reviews", vol_rows, "📈")
+    # top pozitivní
+    story.append(Paragraph("Positive Ausreißer (Verbesserung / viele 5★)", h2))
+    story.append(Spacer(1, 4))
+    if not top_pos:
+        story.append(
+            Paragraph("Keine auffälligen positiven Ausreißer in dieser Woche.", small)
+        )
+    else:
+        for r in top_pos:
+            txt = (
+                f"<strong>{html_escape(r['store'])}</strong> "
+                f"({html_escape(r['region'])}) – "
+                f"Neue Reviews (7 Tage): {r['new_7']} "
+                f"(Ø {r['avg_7']}, "
+                f"{round(r['neg_share_7']*100,1)} % negativ)<br/>"
+                f"30 Tage: {r['new_30']} Reviews, Ø {r['avg_30']} · "
+                f"90 Tage: Ø {r['avg_90']}"
+            )
+            story.append(Paragraph(txt, body))
+            story.append(Spacer(1, 5))
 
-    # poznámka
+    story.append(Spacer(1, 12))
     story.append(
         Paragraph(
-            f"Gefiltert nach Filialen mit ≥ {MIN_WEEKLY_COUNT} neuen Reviews pro Woche "
-            f"oder ≥ {MIN_WEEKLY_DELTA} Veränderung der Ø-Bewertung.",
+            "Hinweis: Risk-Score (0–100) basiert auf Anteil negativer Reviews, "
+            "Veränderung der Durchschnittsbewertung (7 vs. 30/90 Tage) und relativer Anzahl neuer Reviews.",
             small,
         )
     )
@@ -225,7 +381,7 @@ def build_weekly_pdf(filename, all_rows, neg_rows, pos_rows, vol_rows):
     doc.build(story)
 
 
-# ================== RESEND EMAIL ==================
+# ================== RESEND HELPER ==================
 
 
 def send_via_resend(subject, html, pdf_name):
@@ -287,82 +443,134 @@ def send_via_resend(subject, html, pdf_name):
 
 
 def main():
-    # načtení všech weekly dat (všechny filiálky)
-    rows = load_weekly_reviews()
-    neg_rows, pos_rows, vol_rows = split_views(rows)
+    rows_raw = load_weekly_rows()
+    if not rows_raw:
+        print("WEEKLY_REVIEWS_JSON is empty or invalid – no weekly report generated.")
+        return
 
-    # celkový počet nových recenzí za všechny filiálky
-    total_new = sum(r["count_now"] for r in rows)
+    rows = compute_risk_scores(rows_raw)
+    totals = aggregate_totals(rows)
+    by_region = aggregate_by_region(rows)
 
-    # HTML šablona pro weekly report
+    # Top problémové filiálky – podle risk_score, se základním filtrem
+    top_neg = [
+        r
+        for r in rows
+        if r["new_7"] >= MIN_NEW_7 and r["risk_score"] >= 30.0
+    ]
+    top_neg = sorted(top_neg, key=lambda x: x["risk_score"], reverse=True)[
+        :MAX_ROWS_TOP
+    ]
+
+    # Top pozitivní – ty s nízkým podílem negativních a vyšším počtem reviews
+    top_pos = [
+        r
+        for r in rows
+        if r["new_7"] >= MIN_NEW_7 and r["neg_share_7"] <= 0.15 and r["avg_7"] >= 4.2
+    ]
+    top_pos = sorted(
+        top_pos,
+        key=lambda x: (x["avg_7"], x["new_7"]),
+        reverse=True,
+    )[:MAX_ROWS_TOP]
+
+    # ------------------ HTML e-mail ------------------
+
     with open("weekly_template.html", "r", encoding="utf-8") as f:
         tpl = f.read()
 
-    # executive summary (DE)
-    neg_count = len(neg_rows)
-    pos_count = len(pos_rows)
-    vol_count = len(vol_rows)
+    total_new_7 = totals["total_new_7"]
+    total_neg_7 = totals["total_neg_7"]
+    neg_share_7_pct = round(totals["neg_share_7"] * 100, 1)
+    avg7 = totals["avg7_weighted"]
+    avg30 = totals["avg30_weighted"]
+    avg90 = totals["avg90_weighted"]
 
     summary_html = f"""
-<p><strong>Insight:</strong> In der letzten Woche wurden insgesamt <strong>{total_new}</strong> neue Google-Reviews in allen deutschen Kaufland-Filialen erfasst. 
-Davon zeigen <strong>{neg_count}</strong> Filialen einen signifikanten Rückgang und <strong>{pos_count}</strong> eine deutliche Verbesserung der Ø-Bewertung.</p>
+<p><strong>Insight:</strong> In der letzten Woche wurden insgesamt <strong>{total_new_7}</strong> neue Google-Reviews über alle deutschen Kaufland-Filialen erfasst. 
+Davon waren <strong>{total_neg_7}</strong> negativ (1–2★), was einem Anteil von <strong>{neg_share_7_pct} %</strong> entspricht.</p>
 
-<p><strong>Implikation:</strong> Die Übersicht zeigt sowohl negative Ausreißer als auch positive Entwicklungen sowie Filialen mit ungewöhnlich vielen neuen Reviews.</p>
+<p><strong>Implikation:</strong> Die Ø-Bewertung der neuen Reviews liegt aktuell bei <strong>{avg7}</strong> (30 Tage: {avg30}, 90 Tage: {avg90}). 
+Filialen mit auffälliger Verschlechterung oder ungewöhnlich vielen neuen Reviews sind unten hervorgehoben.</p>
 
-<p><strong>Aktion:</strong> Fokus auf Filialen aus der Kategorie „Größter Rückgang der Ø-Bewertung“ – Weitergabe an das jeweilige Regionalmanagement empfohlen.</p>
+<p><strong>Aktion:</strong> Fokus auf Filialen in der Liste „Top Problemfilialen (höchstes Risiko)“ – Weitergabe an das jeweilige Regionalmanagement empfohlen.</p>
 """.strip()
 
-    # tabulky do HTML
-    def build_table_rows(table_rows):
+    def table_rows_for_html(table_rows):
         if not table_rows:
             return (
-                '<tr><td colspan="6" class="muted">'
-                "Keine Filialen mit auffälligen Veränderungen in dieser Kategorie."
+                '<tr><td colspan="7" class="muted">'
+                "Keine Filialen mit erhöhtem Risiko in dieser Kategorie."
                 "</td></tr>"
             )
         out = []
         for r in table_rows:
-            sign_avg = "+" if r["delta_avg"] > 0 else ""
-            sign_cnt = "+" if r["delta_count"] > 0 else ""
+            neg_pct = round(r["neg_share_7"] * 100, 1)
             out.append(
                 f"""
 <tr>
-  <td>{escape(r['region'])}</td>
-  <td>{escape(r['store'])}</td>
-  <td>{r['avg_prev']}</td>
-  <td>{r['avg_now']}</td>
-  <td>{sign_avg}{r['delta_avg']}</td>
-  <td>{r['count_prev']} → {r['count_now']} ({sign_cnt}{r['delta_count']})</td>
+  <td>{html_escape(r['region'])}</td>
+  <td>{html_escape(r['store'])}</td>
+  <td>{r['new_7']}</td>
+  <td>{r['avg_7']}</td>
+  <td>{neg_pct} %</td>
+  <td>{r['risk_score']}</td>
+  <td>{r['new_30']} / {r['new_90']}</td>
 </tr>""".strip()
             )
         return "\n".join(out)
 
-    neg_rows_html = build_table_rows(neg_rows)
-    pos_rows_html = build_table_rows(pos_rows)
-    vol_rows_html = build_table_rows(vol_rows)
+    neg_rows_html = table_rows_for_html(top_neg)
+    pos_rows_html = table_rows_for_html(top_pos)
+
+    # Regionální tabulka pro HTML
+    if not by_region:
+        region_rows_html = (
+            '<tr><td colspan="4" class="muted">Keine regionalen Daten vorhanden.</td></tr>'
+        )
+    else:
+        reg_rows = []
+        for r in by_region:
+            neg_pct = (
+                f"{round(r['neg_share_7']*100,1)} %"
+                if r["total_new_7"] > 0
+                else "–"
+            )
+            reg_rows.append(
+                f"""
+<tr>
+  <td>{html_escape(r['region'])}</td>
+  <td>{r['total_new_7']}</td>
+  <td>{r['total_neg_7']}</td>
+  <td>{neg_pct}</td>
+</tr>""".strip()
+            )
+        region_rows_html = "\n".join(reg_rows)
 
     html = tpl
     replacements = {
         "{date_str}": date_de(TIMEZONE),
         "{tz}": TIMEZONE,
-        "{recipient}": EMAIL_TO or "",
+        "{recipient}": html_escape(EMAIL_TO or ""),
         "{summary_html}": summary_html,
         "{neg_rows_html}": neg_rows_html,
         "{pos_rows_html}": pos_rows_html,
-        "{vol_rows_html}": vol_rows_html,
+        "{region_rows_html}": region_rows_html,
+        "{total_new_reviews}": str(total_new_7),
         "{threshold_note}": (
-            f"Gefiltert nach Filialen mit ≥ {MIN_WEEKLY_COUNT} neuen Reviews "
-            f"oder ≥ {MIN_WEEKLY_DELTA} Veränderung der Ø-Bewertung pro Woche."
+            f"Risk-Score (0–100) basiert auf Anteil negativer Reviews, Veränderung der Durchschnittsbewertung "
+            f"(7 vs. 30/90 Tage) und relativer Anzahl neuer Reviews pro Filiale. "
+            f"Gefiltert nach Filialen mit mindestens {MIN_NEW_7} neuen Reviews (7 Tage)."
         ),
-        "{total_new_reviews}": str(total_new),
     }
     for k, v in replacements.items():
         html = html.replace(k, v)
 
+    # ------------------ PDF ------------------
     pdf_name = f"DE_reviews_weekly_{datetime.now().strftime('%Y-%m-%d')}.pdf"
-    build_weekly_pdf(pdf_name, rows, neg_rows, pos_rows, vol_rows)
+    build_weekly_pdf(pdf_name, rows, top_neg, top_pos, by_region)
 
-    subject = f"📊 Weekly Google Reviews | {total_new} neue Reviews | {date_de(TIMEZONE)}"
+    subject = f"📊 Weekly Google Reviews – Deutschland | {total_new_7} neue Reviews | {date_de(TIMEZONE)}"
     send_via_resend(subject, html, pdf_name)
 
 
