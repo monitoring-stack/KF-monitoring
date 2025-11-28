@@ -1,24 +1,24 @@
 name: Weekly Google Reviews
 
 on:
-  # Pátek – 05:25 UTC ≈ 06:25 CET
+  # a) automaticky každý pátek 05:30 UTC (≈ 06:30/07:30 podle času)
   schedule:
-    - cron: "25 5 * * 5"
-  # Ruční spuštění z GitHub Actions
+    - cron: "30 5 * * FRI"
+  # b) ruční spuštění z Actions
   workflow_dispatch: {}
 
 jobs:
-  weekly-reviews:
+  weekly-google-reviews:
     runs-on: ubuntu-latest
 
     env:
       TIMEZONE: Europe/Berlin
+      # JSON string se statistikami, které jsi uložila jako secret
+      WEEKLY_REVIEWS_JSON: ${{ secrets.WEEKLY_REVIEWS_JSON }}
+      # stejné secrety jako u denního reportu
       RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
       EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
       EMAIL_TO: ${{ secrets.EMAIL_TO }}
-      CC: ${{ secrets.CC }}
-      BCC: ${{ secrets.BCC }}
-      WEEKLY_REVIEWS_JSON: ${{ secrets.WEEKLY_REVIEWS_JSON }}
 
     steps:
       - name: Checkout repository
@@ -32,8 +32,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install -r requirements.txt
 
-      - name: Weekly Google Reviews Report
+      - name: Weekly Google Reviews
         run: |
           python weekly_reviews.py
