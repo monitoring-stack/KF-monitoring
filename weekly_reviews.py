@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import base64
 import urllib.request
@@ -23,12 +24,11 @@ EMAIL_TO = os.getenv("EMAIL_TO")              # hlavní příjemce (Stefan)
 CC = os.getenv("CC")
 BCC = os.getenv("BCC")
 
-# WEEKLY_REVIEWS_JSON = data pro všechny filiálky
-# očekávaný formát (list slovníků):
+# WEEKLY_REVIEWS_JSON = data pro všechny filiálky (agregované metriky)
 # [
 #   {
-#     "region": "Süd",
 #     "store": "Kaufland München-Sendling",
+#     "region": "Süd",           # volitelné, může být přepsáno GeoJSONem
 #     "new_7": 12,
 #     "avg_7": 3.9,
 #     "neg_7": 5,
@@ -43,6 +43,12 @@ BCC = os.getenv("BCC")
 # ]
 WEEKLY_REVIEWS_JSON = os.getenv("WEEKLY_REVIEWS_JSON", "[]")
 
+# GeoJSON se seznamem všech filiálek (uMap export)
+STORES_GEOJSON_PATH = os.getenv(
+    "STORES_GEOJSON_PATH",
+    "kaufland_filialen_deutschland__stand_8_10_2025_.geojson"
+)
+
 # minimální prahy – můžeš kdykoli upravit
 MIN_NEW_7 = int(os.getenv("MIN_NEW_7", "3"))          # min. nových reviews za 7 dní, aby filiálka vstoupila do hodnocení
 MIN_NEW_30 = int(os.getenv("MIN_NEW_30", "5"))
@@ -52,13 +58,77 @@ MIN_NEW_90 = int(os.getenv("MIN_NEW_90", "10"))
 MAX_ROWS_TOP = int(os.getenv("MAX_ROWS_TOP", "7"))
 
 
+# ================== POMOCNÉ FUNKCE ==================
+
+
+def normalize_name(name: str) -> str:
+    """
+    Normalizace názvu filiálky pro matching mezi GeoJSON a WEEKLY_REVIEWS_JSON.
+    """
+    return re.sub(r"\s+", " ", (name or "").strip()).lower()
+
+
+def load_store_regions_from_geojson():
+    """
+    Načte GeoJSON s filiálkami a vrátí mapu:
+        normalized_store_name -> region (např. Bundesland nebo jiný region)
+    Pokud region v datech není, zkusí ho odhadnout z description; jinak '–'.
+    """
+    mapping = {}
+    path = STORES_GEOJSON_PATH
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            gj = json.load(f)
+    except Exception as e:
+        print(f"[weekly_reviews] Konnte GeoJSON {path} nicht lesen: {e}")
+        return mapping
+
+    features = gj.get("features", [])
+    for feat in features:
+        props = feat.get("properties") or {}
+        name = props.get("name") or props.get("Name") or ""
+        if not name:
+            continue
+
+        # pokus o region z vlastností
+        region = (
+            props.get("region")
+            or props.get("Region")
+            or props.get("state")
+            or props.get("State")
+            or props.get("Bundesland")
+            or props.get("bundesland")
+            or props.get("addr:state")
+            or props.get("addr:region")
+        )
+
+        if not region:
+            desc = props.get("description") or props.get("Beschreibung") or ""
+            parts = [p.strip() for p in desc.split(",") if p.strip()]
+            if len(parts) >= 2:
+                # např. "PLZ Stadt, Bundesland"
+                region = parts[-1]
+            else:
+                region = "–"
+
+        mapping[normalize_name(name)] = region
+
+    print(f"[weekly_reviews] Geladene Filial-Regionen aus GeoJSON: {len(mapping)}")
+    return mapping
+
+
 # ================== DATOVÉ FUNKCE ==================
 
 
 def load_weekly_rows():
     """
-    Načte WEEKLY_REVIEWS_JSON a vrátí list normalizovaných záznamů.
+    Načte WEEKLY_REVIEWS_JSON a doplní region dle GeoJSON (pokud je k dispozici).
     """
+    # 1) regiony z GeoJSON
+    geo_regions = load_store_regions_from_geojson()
+
+    # 2) reviews JSON
     try:
         raw = (WEEKLY_REVIEWS_JSON or "").strip()
         if not raw or raw == "[]":
@@ -66,14 +136,19 @@ def load_weekly_rows():
         data = json.loads(raw)
         if not isinstance(data, list):
             return []
-    except Exception:
+    except Exception as e:
+        print(f"[weekly_reviews] WEEKLY_REVIEWS_JSON parse error: {e}")
         return []
 
     rows = []
     for r in data:
         try:
-            region = r.get("region", "–")
-            store = r.get("store", "–")
+            store = r.get("store") or r.get("name") or "–"
+            # region – priorita: JSON -> GeoJSON -> '–'
+            region_from_json = r.get("region")
+            norm_name = normalize_name(store)
+            region_from_geo = geo_regions.get(norm_name)
+            region = region_from_json or region_from_geo or "–"
 
             new_7 = int(r.get("new_7", 0))
             avg_7 = float(r.get("avg_7", 0.0)) if new_7 > 0 else 0.0
@@ -90,7 +165,6 @@ def load_weekly_rows():
             # špatně strukturovaný záznam – přeskočíme
             continue
 
-        # poměry
         neg_share_7 = (neg_7 / new_7) if new_7 > 0 else 0.0
         neg_share_30 = (neg_30 / new_30) if new_30 > 0 else 0.0
         neg_share_90 = (neg_90 / new_90) if new_90 > 0 else 0.0
@@ -127,7 +201,6 @@ def compute_risk_scores(rows):
     if not rows:
         return []
 
-    # průměrný počet nových recenzí za 7 dní přes všechny filiálky (pro relativní zátěž)
     avg_new7_all = sum(r["new_7"] for r in rows) / max(len(rows), 1)
 
     scored = []
@@ -138,23 +211,21 @@ def compute_risk_scores(rows):
         avg_90 = r["avg_90"]
         neg_share_7 = r["neg_share_7"]
 
-        # 1) negativní podíl – maximum 40 bodů
+        # 1) negativní podíl – max 40 bodů
         neg_component = 0.0
-        # nad 20 % začínáme zvyšovat, nad 50 % max
         if new_7 >= MIN_NEW_7:
             if neg_share_7 <= 0.2:
                 neg_component = 0.0
             elif neg_share_7 >= 0.5:
                 neg_component = 40.0
             else:
-                # lineární mezi 20 % a 50 %
                 neg_component = 40.0 * (neg_share_7 - 0.2) / 0.3
 
-        # 2) pokles ratingu (7 vs 30/90) – max 40 bodů
+        # 2) pokles ratingu – max 40 bodů
         drop_component = 0.0
         ref_avg = avg_30 if avg_30 > 0 else avg_90
         if ref_avg > 0 and avg_7 > 0 and new_7 >= MIN_NEW_7:
-            delta = ref_avg - avg_7  # kladné číslo = zhoršení
+            delta = ref_avg - avg_7  # kladné = zhoršení
             if delta <= 0:
                 drop_component = 0.0
             elif delta >= 0.7:
@@ -165,7 +236,7 @@ def compute_risk_scores(rows):
         # 3) nárůst objemu recenzí – max 20 bodů
         volume_component = 0.0
         if avg_new7_all > 0 and new_7 >= MIN_NEW_7:
-            rel = new_7 / avg_new7_all  # poměr vůči průměru
+            rel = new_7 / avg_new7_all
             if rel <= 1.0:
                 volume_component = 0.0
             elif rel >= 3.0:
@@ -196,9 +267,10 @@ def aggregate_totals(rows):
     total_neg_30 = sum(r["neg_30"] for r in rows)
     neg_share_30 = (total_neg_30 / total_new_30) if total_new_30 > 0 else 0.0
 
-    # vážený průměr Ø ratingu (váha = počet reviews)
     def weighted_avg(field_avg, field_n):
-        total_weighted = sum(r[field_avg] * r[field_n] for r in rows if r[field_n] > 0)
+        total_weighted = sum(
+            r[field_avg] * r[field_n] for r in rows if r[field_n] > 0
+        )
         total_n = sum(r[field_n] for r in rows)
         if total_n == 0:
             return 0.0
@@ -243,7 +315,6 @@ def aggregate_by_region(rows):
         bucket["total_new_30"] += r["new_30"]
         bucket["total_neg_30"] += r["neg_30"]
 
-    # dopočítáme podíly
     for region, aggr in regions.items():
         total_new_7 = aggr["total_new_7"]
         total_neg_7 = aggr["total_neg_7"]
@@ -257,7 +328,6 @@ def aggregate_by_region(rows):
             (total_neg_30 / total_new_30) if total_new_30 > 0 else 0.0, 3
         )
 
-    # chceme list, seřazený podle počtu nových reviews (7 dní)
     result = sorted(
         regions.values(),
         key=lambda x: x["total_new_7"],
@@ -303,7 +373,6 @@ def build_weekly_pdf(filename, rows, top_neg, top_pos, by_region):
     story.append(Paragraph(date_de(TIMEZONE), small))
     story.append(Spacer(1, 10))
 
-    # regionální přehled
     story.append(Paragraph("Regionale Übersicht (7 Tage)", h2))
     story.append(Spacer(1, 4))
     if not by_region:
@@ -325,7 +394,6 @@ def build_weekly_pdf(filename, rows, top_neg, top_pos, by_region):
             story.append(Spacer(1, 3))
     story.append(Spacer(1, 10))
 
-    # top negativní
     story.append(Paragraph("Top Problemfilialen (höchstes Risiko)", h2))
     story.append(Spacer(1, 4))
     if not top_neg:
@@ -348,7 +416,6 @@ def build_weekly_pdf(filename, rows, top_neg, top_pos, by_region):
             story.append(Spacer(1, 5))
     story.append(Spacer(1, 10))
 
-    # top pozitivní
     story.append(Paragraph("Positive Ausreißer (Verbesserung / viele 5★)", h2))
     story.append(Spacer(1, 4))
     if not top_pos:
@@ -452,7 +519,6 @@ def main():
     totals = aggregate_totals(rows)
     by_region = aggregate_by_region(rows)
 
-    # Top problémové filiálky – podle risk_score, se základním filtrem
     top_neg = [
         r
         for r in rows
@@ -462,7 +528,6 @@ def main():
         :MAX_ROWS_TOP
     ]
 
-    # Top pozitivní – ty s nízkým podílem negativních a vyšším počtem reviews
     top_pos = [
         r
         for r in rows
@@ -473,8 +538,6 @@ def main():
         key=lambda x: (x["avg_7"], x["new_7"]),
         reverse=True,
     )[:MAX_ROWS_TOP]
-
-    # ------------------ HTML e-mail ------------------
 
     with open("weekly_template.html", "r", encoding="utf-8") as f:
         tpl = f.read()
@@ -523,7 +586,6 @@ Filialen mit auffälliger Verschlechterung oder ungewöhnlich vielen neuen Revie
     neg_rows_html = table_rows_for_html(top_neg)
     pos_rows_html = table_rows_for_html(top_pos)
 
-    # Regionální tabulka pro HTML
     if not by_region:
         region_rows_html = (
             '<tr><td colspan="4" class="muted">Keine regionalen Daten vorhanden.</td></tr>'
@@ -566,7 +628,6 @@ Filialen mit auffälliger Verschlechterung oder ungewöhnlich vielen neuen Revie
     for k, v in replacements.items():
         html = html.replace(k, v)
 
-    # ------------------ PDF ------------------
     pdf_name = f"DE_reviews_weekly_{datetime.now().strftime('%Y-%m-%d')}.pdf"
     build_weekly_pdf(pdf_name, rows, top_neg, top_pos, by_region)
 
