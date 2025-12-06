@@ -1,62 +1,100 @@
+import os
 import re
 from datetime import datetime
 import pytz
-import locale
 
 BRAND_RED = "#E60000"
 
-BOULEVARD_DOMAINS = ["bild.de", "express.de", "tz.de", "promiflash.de"]
+# Domény pro rychlou kategorizaci
+BOULEVARD_DOMAINS = [
+    "bild.de", "express.de", "tz.de", "promiflash.de",
+]
 SERIOUS_HINTS = [
-    "handelsblatt",
-    "lebensmittelzeitung",
-    "faz.net",
-    "sueddeutsche",
-    "zeit.de",
-    "tagesschau",
-    "spiegel.de",
+    "handelsblatt", "lebensmittelzeitung", "faz.net",
+    "sueddeutsche", "zeit.de", "tagesschau", "spiegel.de",
 ]
 
+# Klíčová slova pro „kritické“ články
+CRITICAL_KEYWORDS = re.compile(
+    r"(rückruf|skandal|boykott|shitstorm|krise|ermittlung|ermittlungen|"
+    r"streik|vergiftung|giftig|lebensgefährlich|hygienemangel)",
+    re.I,
+)
 
-def date_de(tz_name="Europe/Berlin"):
+# Pozitivní / provozní slova, která „zjemní“ hodnocení
+POSITIVE_OVERRIDE = re.compile(
+    r"(eröffnung|öffnet|neu(eröffnung)?|modernisiert|renoviert|"
+    r"feier|jubel|rekord|auszeichnung|preis)",
+    re.I,
+)
+
+
+def date_de(tz_name: str = "Europe/Berlin") -> str:
     """
-    Vrátí dnešní datum v německém formátu, např. 'Donnerstag, 14. November 2025'.
+    Vrátí aktuální datum v DE formátu, včetně názvu dne.
     """
+    import locale
     try:
         locale.setlocale(locale.LC_TIME, "de_DE.UTF-8")
     except Exception:
-        # fallback – když systém locale nemá
+        # na některých systémech locale není, nevadí – použije anglické názvy
         pass
 
     tz = pytz.timezone(tz_name)
-    now = datetime.now(tz)
-    return now.strftime("%A, %d. %B %Y")
+    return datetime.now(tz).strftime("%A, %d. %B %Y")
 
 
-def classify(url, title):
+def classify(url: str, title: str, summary: str = ""):
     """
-    Z URL a titulku odhadne:
-      - host (doména)
-      - typ ('Boulevard', 'seriös', 'neutral/spekulativ')
-      - score (číslo ~ relevanci / riziku)
+    Klasifikace článku:
+    - vrací (host, typ, score, is_critical, topic, is_international)
+
+    score:
+    - základ 1–3 podle typu média (seriös / Boulevard / neutral)
+    - +2 za obsahová klíčová slova (Rückruf, Skandal, Invest, Eröffnung…)
     """
+
     host = re.sub(r"^https?://", "", url).split("/")[0].lower()
 
+    # typ média
     if any(d in host for d in BOULEVARD_DOMAINS):
-        t = "Boulevard"
+        medium_type = "Boulevard"
+        base_score = 2
     elif any(d in host for d in SERIOUS_HINTS):
-        t = "seriös"
+        medium_type = "seriös"
+        base_score = 3
     else:
-        t = "neutral/spekulativ"
+        medium_type = "neutral/spekulativ"
+        base_score = 1
 
-    # základní skóre podle typu média
-    score = 3 if t == "seriös" else 2 if t == "Boulevard" else 1
+    text = f"{title} {summary}".lower()
 
-    # klíčová slova zvyšující skóre
-    if re.search(
-        r"Umsatz|Eröffnung|Rückruf|Skandal|Boykott|Krise|ESG|Invest|Streik|Datenschutz",
-        title,
-        re.I,
-    ):
-        score += 2
+    # obsahová posila score
+    if re.search(r"(umsatz|eröffnung|rückruf|skandal|boykott|krise|esg|invest)",
+                 text, re.I):
+        base_score += 2
 
-    return host, t, score
+    # kritičnost – ale s ohledem na pozitivní override
+    has_critical = bool(CRITICAL_KEYWORDS.search(text))
+    has_positive = bool(POSITIVE_OVERRIDE.search(text))
+
+    # Pokud je článek „provozní / pozitivní“ (otevírá, modernizuje),
+    # tak ho jako kritický NEoznačíme, i když je tam např. „Flaute“.
+    is_critical = has_critical and not has_positive
+
+    # základní topic – hodně jednoduché, ale přehledné
+    topic = "Sonstiges"
+    if re.search(r"rückruf|qualität|lebensgefährlich|produkt",
+                 text, re.I):
+        topic = "Qualität & Rückruf"
+    elif re.search(r"hygiene|filiale|markt|öffnung|öffnen|eröffnung|umbau|modernisiert",
+                   text, re.I):
+        topic = "Hygiene & Filialbetrieb"
+    elif re.search(r"preis(e)?|angebote|rabatt|billig|teuer",
+                   text, re.I):
+        topic = "Preis & Wettbewerb"
+
+    # „mezinárodní / virální“ – cokoliv, co není .de doména
+    is_international = not host.endswith(".de")
+
+    return host, medium_type, base_score, is_critical, topic, is_international
