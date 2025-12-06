@@ -9,19 +9,21 @@ from html import escape
 
 import feedparser
 from bs4 import BeautifulSoup
+
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
+from reportlab.lib import colors
 
-from helpers import date_de, classify
+from helpers import date_de  # classify necháme v helpers, ale kritičnost řešíme tady
 
-# ================== KONFIGURACE ==================
+# ================== KONFIGURACE / ENV ==================
 
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Berlin")
 
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
-EMAIL_FROM = os.getenv("EMAIL_FROM")
+EMAIL_FROM = os.getenv("EMAIL_FROM")  # např. "Kaufland Monitoring <reports@…>"
 EMAIL_TO = os.getenv("EMAIL_TO")
 CC = os.getenv("CC")
 BCC = os.getenv("BCC")
@@ -34,101 +36,129 @@ FEEDS = [
     "https://news.google.com/rss/search?q=Kaufland+Skandal+OR+R%C3%BCckruf+OR+Boykott&hl=de&gl=DE&ceid=DE:de",
 ]
 
-# Témata – první shoda vyhrává
-TOPIC_RULES = [
-    ("Qualität & Rückruf", r"rückruf|lebensgefährlich|verzehren|qualität|verunreinigung"),
-    ("Hygiene & Filialbetrieb", r"hygiene|hygieneskandal|schimmel|mäuse|kakerlaken|filiale|markt"),
-    ("Reputationsrisiken", r"boykott|shitstorm|skandal|kritik|verbraucherzentrale|protest"),
-    ("Preise & Wettbewerb", r"preis|discount|angebot|aktion|billig|teuer|aldi|lidl|rewe|edeka|wettbewerb"),
-    ("Expansion & Standorte", r"neu(er)?öffnung|eröffnung|erweitert|umbau|modernisiert|standort"),
-    ("Nachhaltigkeit & ESG", r"nachhaltig|klima|umwelt|co2|esg|tierwohl|bio"),
-]
-
-CRITICAL_KEYWORDS = re.compile(
-    r"rückruf|skandal|boykott|shitstorm|krise|gesundheit|lebensgefährlich",
-    re.I,
-)
-
-FOLLOWUP_PATTERNS = re.compile(
-    r"""
-    wiedereröffnung|
-    wieder\s+geöffnet|
-    öffnet\s+wieder|
-    modernisiert|
-    nach\s+.*skandal.*öffnet|
-    problem\s+behoben|
-    skandal\s+überstanden|
-    entwarnung
-    """,
-    re.X | re.I,
-)
-
-
 # ================== POMOCNÉ FUNKCE ==================
 
 
-def parse_pubdate(entry):
-    """Vrátí datetime (UTC) nebo None."""
-    dt_struct = getattr(entry, "published_parsed", None) or getattr(
-        entry, "updated_parsed", None
+def _now_tz():
+    """'Teď' v nastavené timezone (bez řešení letního času – pro filtr 24h to stačí)."""
+    # jednoduše vezmeme UTC a posuneme podle offsetu, aby to bylo stabilní
+    # (přesný timezone handling by byl přes pytz/zoneinfo, ale nechceme tahat další lib).
+    return datetime.utcnow()
+
+
+def is_recent(entry, hours=30):
+    """Vrátí True, pokud je článek mladší než `hours` hodin."""
+    if not hasattr(entry, "published_parsed") or entry.published_parsed is None:
+        return True  # raději nic nevyhazovat, když chybí datum
+    published = datetime(*entry.published_parsed[:6])
+    delta = _now_tz() - published
+    return delta <= timedelta(hours=hours)
+
+
+def thematics_for_item(title, summary, source_host):
+    """
+    Určí:
+      - topic: 'Qualität & Rückruf' / 'Hygiene & Filialbetrieb' / 'Sonstiges'
+      - is_critical: bool
+      - is_international: bool
+    podle jednoduchých, ale rozumných heuristik.
+    """
+
+    text = f"{title} {summary}".lower()
+
+    # Silná negativní slova
+    strong_negative = [
+        "rückruf",
+        "skandal",
+        "boykott",
+        "krise",
+        "shitstorm",
+        "ekel",
+        "gammelfleisch",
+        "hygienemangel",
+        "hygienemängel",
+        "vergiftung",
+        "gefährlich",
+        "lebensgefährlich",
+        "ermittlungen",
+        "anzeige",
+        "verklagt",
+        "strafe",
+        "abmahnung",
+    ]
+
+    hygiene_words = [
+        "hygiene",
+        "hygieneskandal",
+        "hygienemangel",
+        "hygienemängel",
+        "schimmel",
+        "schmutz",
+        "gammel",
+        "verunreinigt",
+    ]
+
+    quality_words = [
+        "rückruf",
+        "produktwarnung",
+        "produktrueckruf",
+        "verzehren",
+        "verderb",
+        "mindesthaltbarkeitsdatum",
+    ]
+
+    # Slova, která naznačují spíš expanzi / otevírání (blokují "kritisch")
+    expansion_words = [
+        "eröffnung",
+        "neueröffnung",
+        "neueröffnung",
+        "öffnet",
+        "öffnet mehrere neue filialen",
+        "neue filiale",
+        "neue filialen",
+        "neuer markt",
+        "eröffnet neu",
+        "modernisiert",
+        "modernisierung",
+        "umbau",
+        "sanierung",
+    ]
+
+    has_strong_neg = any(w in text for w in strong_negative + hygiene_words)
+    has_expansion = any(w in text for w in expansion_words)
+
+    # Kritické pouze, pokud je opravdu negativní tón a současně to není čistá expanze/otevření
+    is_critical = bool(has_strong_neg and not has_expansion)
+
+    # Témata
+    if any(w in text for w in quality_words):
+        topic = "Qualität & Rückruf"
+    elif any(w in text for w in hygiene_words) or "filiale" in text or "markt" in text:
+        topic = "Hygiene & Filialbetrieb"
+    else:
+        topic = "Sonstiges"
+
+    # International / virální – zjednodušeně: pokud nejsme .de nebo se zmiňuje zahraničí
+    international_keywords = [
+        "österreich",
+        "polen",
+        "tschechien",
+        "tschech",
+        "rumänien",
+        "bulgarien",
+        "slowakei",
+        "kroatien",
+        "international",
+    ]
+    is_international = (not source_host.endswith(".de")) or any(
+        kw in text for kw in international_keywords
     )
-    if not dt_struct:
-        return None
-    return datetime(*dt_struct[:6])
 
-
-def is_recent(entry, hours=36):
-    dt = parse_pubdate(entry)
-    if not dt:
-        # když nemáme datum, raději ponecháme
-        return True
-    now_utc = datetime.utcnow()
-    return now_utc - dt <= timedelta(hours=hours)
-
-
-def assign_topic(text: str) -> str:
-    tl = text.lower()
-    for topic, pattern in TOPIC_RULES:
-        if re.search(pattern, tl, re.I):
-            return topic
-    return "Sonstiges"
-
-
-def is_international(host: str, title: str) -> bool:
-    host = (host or "").lower()
-    if not host.endswith(".de"):
-        return True
-    if "österreich" in title.lower() or "polen" in title.lower():
-        return True
-    return False
-
-
-def is_critical_topic(topic: str, text: str) -> bool:
-    """
-    Rozhoduje, jestli článek považujeme za „kritický“.
-
-    Nově:
-    - rozeznáváme follow-up / Entwarnung: „öffnet wieder“, „modernisiert“, „Wiedereröffnung“…
-      → tyto články *nejsou* kritické, i když je v textu „Skandal“, atd.
-    """
-    tl = text.lower()
-
-    # 1) Follow-up / Entwarnung – znovuotevření po skandálu, modernizace apod.
-    if FOLLOWUP_PATTERNS.search(tl):
-        return False
-
-    # 2) Primárně rizikové kategorie – jen pokud to není follow-up (viz výše)
-    if topic in ("Qualität & Rückruf", "Hygiene & Filialbetrieb", "Reputationsrisiken"):
-        return True
-
-    # 3) Fallback podle klíčových slov
-    if CRITICAL_KEYWORDS.search(tl):
-        return True
-
-    return False
-
-
-# ================== NEWS FETCH ==================
+    return {
+        "topic": topic,
+        "is_critical": is_critical,
+        "is_international": is_international,
+    }
 
 
 def fetch_news():
@@ -138,34 +168,31 @@ def fetch_news():
     for url in FEEDS:
         d = feedparser.parse(url)
         for e in d.entries:
+            if not is_recent(e):
+                continue
+
             link = e.link
             if link in seen:
                 continue
             seen.add(link)
 
-            if not is_recent(e, hours=36):
-                continue
-
             title = e.title
             desc = BeautifulSoup(getattr(e, "summary", ""), "html.parser").get_text()
-            host, typ, base_score = classify(link, title)
 
-            text_for_topic = f"{title} {desc}"
-            topic = assign_topic(text_for_topic)
+            # Zdroj / host
+            host = re.sub(r"^https?://", "", link).split("/")[0]
 
-            critical = is_critical_topic(topic, text_for_topic)
-            international = is_international(host, title)
+            meta = thematics_for_item(title, desc, host)
 
-            score = base_score
-            if critical:
-                score += 2
-            if international:
+            # Skóre pro řazení – základ: kritické a silně negativní nahoru
+            score = 0
+            if meta["is_critical"]:
+                score += 3
+            if meta["is_international"]:
                 score += 1
-
-            pub_dt = parse_pubdate(e)
-            when_str = None
-            if pub_dt:
-                when_str = pub_dt.strftime("%d.%m. %H:%M")
+            # preferujeme serióznější domény vs. čisté aggregation (news.google.com)
+            if host != "news.google.com":
+                score += 1
 
             items.append(
                 {
@@ -173,12 +200,8 @@ def fetch_news():
                     "url": link,
                     "summary": (desc[:260] + "…") if len(desc) > 260 else desc,
                     "source": host,
-                    "type": typ,
                     "score": score,
-                    "topic": topic,
-                    "critical": critical,
-                    "international": international,
-                    "when": when_str,
+                    **meta,
                 }
             )
 
@@ -186,83 +209,119 @@ def fetch_news():
     return items
 
 
-def group_by_topic(items):
-    buckets = {}
+def bucket_by_topic(items):
+    buckets = {
+        "Qualität & Rückruf": [],
+        "Hygiene & Filialbetrieb": [],
+        "Sonstiges": [],
+    }
     for it in items:
         buckets.setdefault(it["topic"], []).append(it)
-
-    grouped = []
-    for topic, lst in buckets.items():
-        lst_sorted = sorted(lst, key=lambda x: x["score"], reverse=True)
-        max_score = lst_sorted[0]["score"] if lst_sorted else 0
-        grouped.append((topic, lst_sorted, max_score))
-
-    # Kategorie podle nejsilnějšího článku
-    grouped.sort(key=lambda x: x[2], reverse=True)
-    return grouped
+    # odstranit prázdné
+    return {k: v for k, v in buckets.items() if v}
 
 
-# ================== PDF REPORT ==================
+# ================== PDF (MAGAZINE STYL) ==================
 
 
-def build_pdf(filename, grouped_items, meta):
-    styles = getSampleStyleSheet()
-    title_style = styles["Title"]
-    h1 = styles["Heading1"]
-    normal = styles["Normal"]
+def build_pdf(filename, items):
+    topics = bucket_by_topic(items)
 
     doc = SimpleDocTemplate(
         filename,
         pagesize=landscape(A4),
         leftMargin=18 * mm,
         rightMargin=18 * mm,
-        topMargin=18 * mm,
-        bottomMargin=18 * mm,
+        topMargin=16 * mm,
+        bottomMargin=16 * mm,
+    )
+
+    styles = getSampleStyleSheet()
+    styles.add(
+        ParagraphStyle(
+            name="Category",
+            parent=styles["Heading1"],
+            fontSize=20,
+            textColor=colors.HexColor("#E60000"),
+            spaceBefore=12,
+            spaceAfter=6,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="ArticleTitle",
+            parent=styles["Normal"],
+            fontName="Helvetica-Bold",
+            fontSize=11,
+            spaceAfter=2,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="Meta",
+            parent=styles["Normal"],
+            fontSize=9,
+            textColor=colors.grey,
+            spaceAfter=4,
+        )
     )
 
     story = []
 
-    # Hlavní titulek
+    # Header
     story.append(
         Paragraph(
-            f"DE Monitoring – privat | {meta['date_str']}",
-            title_style,
+            f"DE Monitoring – privat | {date_de(TIMEZONE)}",
+            styles["Title"],
         )
     )
     story.append(Spacer(1, 6))
 
-    intro_text = (
-        f"Insgesamt {meta['total_count']} Artikel im Auswertungszeitraum. "
-        f"{meta['critical_count']} davon als kritisch eingestuft, "
-        f"{meta['international_count']} virale / internationale Erwähnungen. "
-        f"Schwerpunktthemen: {meta['theme_summary']}."
-    )
-    story.append(Paragraph(intro_text, normal))
-    story.append(Spacer(1, 10))
+    total = len(items)
+    critical_count = sum(1 for i in items if i["is_critical"])
+    international_count = sum(1 for i in items if i["is_international"])
 
-    # Témata
-    for topic, lst, _max_score in grouped_items:
-        story.append(Paragraph(topic, h1))
+    # Shrnutí pod titulkem
+    focus_topics = ", ".join(
+        f"{topic} ({len(arts)})" for topic, arts in topics.items()
+    )
+    summary_line = (
+        f"Insgesamt {total} Artikel im Auswertungszeitraum. "
+        f"{critical_count} davon als kritisch eingestuft, "
+        f"{international_count} virale / internationale Erwähnungen. "
+        f"Schwerpunktthemen: {focus_topics}."
+    )
+    story.append(Paragraph(summary_line, styles["Normal"]))
+    story.append(Spacer(1, 12))
+
+    # Kategorie
+    for topic, arts in topics.items():
+        story.append(Paragraph(topic, styles["Category"]))
         story.append(Spacer(1, 4))
 
-        for it in lst:
-            flags = []
-            if it["critical"]:
-                flags.append("■ Kritisch")
-            if it["international"]:
-                flags.append("● Virale Erwähnung")
-            flags_str = " · ".join(flags) if flags else ""
+        for it in arts:
+            badges = []
+            if it["is_critical"]:
+                badges.append("■ Kritisch")
+            if it["is_international"]:
+                badges.append("● Virale / internationale Erwähnung")
 
-            header = f"{escape(it['title'])} [{escape(it['source'])}]"
-            if flags_str:
-                header += f" · {flags_str}"
+            meta_line = f"{it['source']}"
+            if badges:
+                meta_line += " · " + " · ".join(badges)
 
-            story.append(Paragraph(header, normal))
+            story.append(
+                Paragraph(
+                    escape(it["title"]),
+                    styles["ArticleTitle"],
+                )
+            )
+            story.append(Paragraph(escape(meta_line), styles["Meta"]))
             if it.get("summary"):
-                story.append(Paragraph(escape(it["summary"]), normal))
-            story.append(Spacer(1, 2))
-
-        story.append(Spacer(1, 8))
+                story.append(
+                    Paragraph(escape(it["summary"]), styles["Normal"])
+                )
+            story.append(Spacer(1, 6))
 
     doc.build(story)
 
@@ -289,7 +348,7 @@ def send_via_resend(subject, html, pdf_name):
         "html": html,
         "attachments": [
             {
-                "filename": os.path.basename(pdf_name),
+                "filename": pdf_name,
                 "content": pdf_b64,
             }
         ],
@@ -312,73 +371,102 @@ def send_via_resend(subject, html, pdf_name):
         method="POST",
     )
 
-    with urllib.request.urlopen(req) as resp:
-        body = resp.read().decode("utf-8")
-        print("Resend response:", resp.status, body)
+    try:
+        with urllib.request.urlopen(req) as resp:
+            body = resp.read().decode("utf-8")
+            print("Resend response:", resp.status, body)
+    except urllib.error.HTTPError as e:
+        print("Resend HTTP error:", e.code, e.read().decode("utf-8"))
+        raise
+    except urllib.error.URLError as e:
+        print("Resend connection error:", e.reason)
+        raise
 
 
-# ================== EMAIL RENDERING ==================
+# ================== MAIN ==================
 
 
-def build_email_html(items, grouped_topics):
+def main():
+    items = fetch_news()
+
+    if not items:
+        print("No items fetched – nothing to send.")
+        return
+
+    # Top N pro e-mail
+    top_items = items[:5]
+
+    # --- Načti HTML šablonu ---
     with open("email_template.html", "r", encoding="utf-8") as f:
         template_str = f.read()
 
-    total_count = len(items)
-    critical_count = sum(1 for it in items if it["critical"])
-    international_count = sum(1 for it in items if it["international"])
+    total = len(items)
+    critical_count = sum(1 for i in items if i["is_critical"])
+    international_count = sum(1 for i in items if i["is_international"])
 
-    # Top 3 Schlagzeilen
-    top_items = items[: min(MAX_TOP, len(items), 3)]
+    # Dominantní témata podle počtu článků
+    topic_counts = {}
+    for it in items:
+        topic_counts[it["topic"]] = topic_counts.get(it["topic"], 0) + 1
+    sorted_topics = sorted(topic_counts.items(), key=lambda x: x[1], reverse=True)
+    topics_str = ", ".join(f"{t} ({c})" for t, c in sorted_topics)
+
+    executive_summary_html = f"""
+<p>Heute wurden insgesamt <strong>{total}</strong> relevante Erwähnungen zu Kaufland erfasst.</p>
+<p>Davon sind <strong>{critical_count}</strong> als potentiell kritisch (Rückruf, Skandal, Boykott, Krise) eingestuft.
+Zusätzlich gibt es <strong>{international_count}</strong> virale / internationale Erwähnungen.</p>
+<p>Thematisch dominieren heute: <strong>{escape(topics_str)}</strong>. Vollständige Liste inkl. thematischer Einordnung
+und aller Quellen im angehängten PDF.</p>
+""".strip()
+
+    # Top 3 Schlagzeilen HTML
     top_items_html = []
-    for i, it in enumerate(top_items, start=1):
+    for idx, it in enumerate(top_items, start=1):
         badges = []
-        if it["critical"]:
-            badges.append("⚠️ Kritisch")
-        if it["international"]:
+        if it["is_critical"]:
+            badges.append("⚠ Kritisch")
+        if it["is_international"]:
             badges.append("🌍 Virale Erwähnung")
-        badges_str = " · ".join(badges) if badges else ""
 
-        meta_parts = [escape(it.get("source", ""))]
-        if it.get("when"):
-            meta_parts.append(it["when"])
-        if badges_str:
-            meta_parts.append(badges_str)
-        meta = " · ".join(meta_parts)
+        meta_parts = [escape(it["source"])]
+        if badges:
+            meta_parts.append(" · ".join(badges))
+        meta_html = " · ".join(meta_parts)
 
         top_items_html.append(
             f"""
 <li class="item">
-  <div class="rank">{i}</div>
+  <div class="rank">{idx}</div>
   <div>
     <a href="{it['url']}">{escape(it['title'])}</a>
-    <div class="meta">{meta}</div>
+    <div class="meta">{meta_html}</div>
   </div>
 </li>""".strip()
         )
 
-    # Tematický souhrn (1–2 největší témata)
-    theme_counts = [(topic, len(lst)) for topic, lst, _ in grouped_topics]
-    theme_counts.sort(key=lambda x: x[1], reverse=True)
-    top_themes = [f"{t} ({c})" for t, c in theme_counts[:2]]
-    theme_summary = ", ".join(top_themes) if top_themes else "–"
+    # International / virální seznam pro e-mail (max 10, mimo Top 3)
+    international_items_html = []
+    remaining = [it for it in items if it not in top_items and it["is_international"]]
+    for it in remaining[:10]:
+        badges = []
+        if it["is_critical"]:
+            badges.append("⚠ Kritisch")
+        badges.append("🌍 Virale Erwähnung")
+        meta_html = escape(it["source"])
+        if badges:
+            meta_html += " · " + " · ".join(badges)
+        international_items_html.append(
+            f"""
+<li class="item">
+  <div class="rank">•</div>
+  <div>
+    <a href="{it['url']}">{escape(it['title'])}</a>
+    <div class="meta">{meta_html}</div>
+  </div>
+</li>""".strip()
+        )
 
-    executive_summary_html = f"""
-<p>Heute wurden insgesamt <strong>{total_count}</strong> relevante Erwähnungen zu Kaufland erfasst.</p>
-<p>Davon sind <strong>{critical_count}</strong> als potentiell kritisch (Rückruf, Skandal, Boykott, Krise) eingestuft.
-Zusätzlich gibt es <strong>{international_count}</strong> virale / internationale Erwähnungen.</p>
-<p>Thematisch dominieren heute: <strong>{theme_summary}</strong>.
-Vollständige Liste inkl. thematischer Einordnung und aller Quellen im angehängten PDF.</p>
-""".strip()
-
-    # Google Reviews – zatím jen statický placeholder
-    review_rows = [
-        """<tr><td colspan="5" class="muted">
-Noch keine auffälligen Veränderungen in den vorliegenden Google-Reviews-Daten (Pilotmodus oder stabile Lage).
-</td></tr>"""
-    ]
-    reviews_note = "Gefiltert nach Filialen mit ≥ 3 neuen Reviews oder ≥ 0.2 Veränderung der Ø-Bewertung (24h)."
-
+    # Placeholdery v šabloně nahradíme simple replace (ne .format, aby se nebilo s { } v CSS)
     html = template_str
     replacements = {
         "{date_str}": date_de(TIMEZONE),
@@ -387,45 +475,16 @@ Noch keine auffälligen Veränderungen in den vorliegenden Google-Reviews-Daten 
         "{executive_summary_html}": executive_summary_html,
         "{top_count}": str(len(top_items)),
         "{top_headlines_html}": "\n".join(top_items_html),
-        "{reviews_table_rows_html}": "\n".join(review_rows),
-        "{reviews_note}": reviews_note,
-        "{urgent_block_html}": "",
-        "{rumors_block_html}": "",
-        "{international_html}": "",  # international je teď rozpuštěné v hlavním seznamu
+        "{international_html}": "\n".join(international_items_html),
     }
     for key, val in replacements.items():
         html = html.replace(key, val)
 
-    return html, theme_summary, total_count, critical_count, international_count
-
-
-# ================== MAIN ==================
-
-
-def main():
-    items = fetch_news()
-    if not items:
-        print("No items fetched.")
-        return
-
-    grouped = group_by_topic(items)
-
-    html, theme_summary, total_count, critical_count, international_count = (
-        build_email_html(items, grouped)
-    )
-
-    meta = {
-        "date_str": date_de(TIMEZONE),
-        "theme_summary": theme_summary,
-        "total_count": total_count,
-        "critical_count": critical_count,
-        "international_count": international_count,
-    }
-
+    # PDF + odeslání
     pdf_name = f"DE_monitoring_privat_{datetime.now().strftime('%Y-%m-%d')}.pdf"
-    build_pdf(pdf_name, grouped, meta)
+    build_pdf(pdf_name, items)
 
-    subject = f"📰 Kaufland Media & Review Briefing – Deutschland | {meta['date_str']}"
+    subject = f"📰 Kaufland Media & Review Briefing – Deutschland | {date_de(TIMEZONE)}"
     send_via_resend(subject, html, pdf_name)
 
 
