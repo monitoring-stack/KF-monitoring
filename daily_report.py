@@ -156,7 +156,7 @@ def fetch_news():
             raw_summary = getattr(e, "summary", "") or getattr(e, "description", "")
             desc = BeautifulSoup(raw_summary, "html.parser").get_text(" ", strip=True)
 
-            host, src_type, base_score = classify(link, title)
+            host, src_type, base_score, *_ = classify(link, title)
 
             text_for_topic = f"{title} {desc}"
             topic = classify_topic(text_for_topic)
