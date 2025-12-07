@@ -251,9 +251,14 @@ def build_email_html(items):
     else:
         international_block_html = ""
 
-    # Načteme tvou HTML šablonu a jen nahradíme placeholdery
+      # Načteme tvou HTML šablonu a jen nahradíme placeholdery
     with open("email_template.html", "r", encoding="utf-8") as f:
         template_str = f.read()
+
+    # Předpokládám, že už máš někde:
+    # - executive_summary_html  (string s HTML odstavci)
+    # - top_block_html          (HTML <li>…</li> pro Top N)
+    # - top_items               (seznam top článků)
 
     replacements = {
         "{date_str}": date_str,
@@ -262,8 +267,14 @@ def build_email_html(items):
         "{critical_count}": str(crit),
         "{international_count}": str(intl),
         "{themes_str}": themes_str,
+
+        # 👇 to už jsi měl
         "{top_headlines_html}": top_block_html,
         "{international_block_html}": international_block_html,
+
+        # 👇 NOVÉ klíče pro šablonu
+        "{executive_summary_html}": executive_summary_html,
+        "{top_count}": str(len(top_items)),
     }
 
     html = template_str
