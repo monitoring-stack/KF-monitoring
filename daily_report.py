@@ -387,9 +387,12 @@ def send_via_resend(subject, html, pdf_name):
 
 def main():
     items = fetch_news()
+    print(f"Fetched {len(items)} items from Google News.")
+
+    # I když nic nenajdeme, chceme poslat "prázdný" report,
+    # aby bylo jasné, že monitoring běžel.
     if not items:
-        print("No items found for today – email not sent.")
-        return
+        print("No items found for today – sending empty report.")
 
     pdf_name = f"DE_monitoring_privat_{datetime.now().strftime('%Y-%m-%d')}.pdf"
     build_pdf(pdf_name, items)
