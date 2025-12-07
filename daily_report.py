@@ -1,7 +1,7 @@
 import os
 import json
 import base64
-from datetime import datetime
+from datetime import datetime, timedelta
 from html import escape
 from collections import Counter
 
@@ -28,11 +28,27 @@ BCC = os.getenv("BCC")
 
 MAX_TOP = int(os.getenv("MAX_TOP", "10"))
 
-FEEDS = [
+# Kolik dní zpět bereme (RSS může obsahovat starší články)
+MAX_DAYS = int(os.getenv("MAX_DAYS", "2"))
+
+# Základ: Google News
+BASE_FEEDS = [
     "https://news.google.com/rss/search?q=Kaufland+Deutschland&hl=de&gl=DE&ceid=DE:de",
     "https://news.google.com/rss/search?q=Kaufland+Filiale&hl=de&gl=DE&ceid=DE:de",
     "https://news.google.com/rss/search?q=Kaufland+Skandal+OR+R%C3%BCckruf+OR+Boykott&hl=de&gl=DE&ceid=DE:de",
 ]
+
+# Volitelné lokální RSS (JSON list URL), např.:
+# LOCAL_FEEDS_JSON='["https://www.xyz.de/rss", "https://www.abc.de/feed"]'
+LOCAL_FEEDS_JSON = os.getenv("LOCAL_FEEDS_JSON", "[]")
+try:
+    LOCAL_FEEDS = json.loads(LOCAL_FEEDS_JSON)
+    if not isinstance(LOCAL_FEEDS, list):
+        LOCAL_FEEDS = []
+except Exception:
+    LOCAL_FEEDS = []
+
+FEEDS = BASE_FEEDS + LOCAL_FEEDS
 
 
 # ================== POMOCNÉ FUNKCE ==================
@@ -40,15 +56,16 @@ FEEDS = [
 
 def classify_article(title: str, summary: str, link: str):
     """
-    Navazuje na helpers.classify – počítáme s tím, že může vracet 3 nebo 4 hodnoty.
-    My si vezmeme první 3 + zbytek ignorujeme.
+    Napojení na helpers.classify – očekáváme (host, src_type, base_score, *rest).
+    Zbytek ignorujeme; vlastní logika kritičnosti a kategorií jede tady.
     """
     host, src_type, base_score, *rest = classify(link, title)
 
     text = f"{title} {summary}".lower()
 
-    # Kritické – velmi úzké, aby se tam nedostala každá "po skandálu opět otevřeno"
+    # Kritické – rozšířená sada, ale stále konzervativní
     crit_keywords = [
+        # Zdraví / potraviny
         "rückruf",
         "nicht essen",
         "nicht verzehren",
@@ -58,6 +75,23 @@ def classify_article(title: str, summary: str, link: str):
         "salmonell",
         "warnung",
         "gesundheitsschädlich",
+        # Práce / zaměstnanci / bezpečnost
+        "arbeitsbedingungen",
+        "ausbeutung",
+        "streik",
+        "tarifstreit",
+        "kündigungswelle",
+        "mobbing",
+        "arbeitsgericht",
+        "unfall",
+        "arbeitssicherheit",
+        # Data / reputace
+        "datenleck",
+        "hackerangriff",
+        "cyberangriff",
+        "datenschutzverstoß",
+        "skandal",
+        "boykott",
     ]
     is_critical = any(kw in text for kw in crit_keywords)
 
@@ -76,6 +110,8 @@ def classify_article(title: str, summary: str, link: str):
             "eröffnung",
             "umbau",
             "modernisiert",
+            "schließt",
+            "schliessung",
         ]
     ):
         category = "Hygiene & Filialbetrieb"
@@ -84,7 +120,7 @@ def classify_article(title: str, summary: str, link: str):
     ):
         category = "Preis & Angebot"
 
-    # Mezinárodní / virální – velmi hrubě podle domény
+    # Mezinárodní / virální – velmi hrubě podle domény (cokoli mimo .de)
     is_international = not host.endswith(".de")
 
     return host, src_type, base_score, {
@@ -94,14 +130,36 @@ def classify_article(title: str, summary: str, link: str):
     }
 
 
+def _is_recent(entry, max_days: int) -> bool:
+    """
+    Zkusí vyhodnotit, zda je článek mladší než max_days.
+    Pokud nemáme published info, raději článek NEfiltrujeme.
+    """
+    parsed = getattr(entry, "published_parsed", None) or getattr(
+        entry, "updated_parsed", None
+    )
+    if not parsed:
+        return True  # raději zařadit než omylem zahodit
+
+    pub_dt = datetime(*parsed[:6])
+    now = datetime.utcnow()
+    return (now - pub_dt) <= timedelta(days=max_days)
+
+
 def fetch_news():
-    """Stáhne všechny články z RSS, odstraní duplicity, nic zbytečně nefiltruje."""
+    """
+    Stáhne všechny články z FEEDS (Google News + lokální RSS),
+    odstraní duplicity, aplikuje časový filtr a vrátí seřazený list.
+    """
     seen = set()
     items = []
 
     for url in FEEDS:
         d = feedparser.parse(url)
         for e in d.entries:
+            if not _is_recent(e, MAX_DAYS):
+                continue
+
             link = e.link
             if link in seen:
                 continue
@@ -113,7 +171,8 @@ def fetch_news():
             if len(desc) > 260:
                 desc = desc[:260] + "…"
 
-            pub = getattr(e, "published", "")
+            pub = getattr(e, "published", getattr(e, "updated", ""))
+
             host, src_type, base_score, meta = classify_article(title, desc, link)
 
             items.append(
@@ -137,19 +196,30 @@ def fetch_news():
 
 
 def bucket_by_category(items):
+    """
+    Rozdělí články do kategorií a v rámci kategorií je seřadí podle score.
+    Kategorie s nejvyšší prioritou (Qualität & Rückruf, …) jdou nahoru.
+    """
     buckets = {}
     for it in items:
         cat = it.get("category", "Sonstiges")
         buckets.setdefault(cat, []).append(it)
 
-    # Preferovaný pořadník kategorií
-    order = ["Qualität & Rückruf", "Hygiene & Filialbetrieb", "Preis & Angebot", "Sonstiges"]
+    # Seřadit uvnitř kategorií podle score
+    for cat in buckets:
+        buckets[cat].sort(key=lambda x: x["score"], reverse=True)
+
+    order = [
+        "Qualität & Rückruf",
+        "Hygiene & Filialbetrieb",
+        "Preis & Angebot",
+        "Sonstiges",
+    ]
     sorted_buckets = []
 
     for cat in order:
         if cat in buckets:
             sorted_buckets.append((cat, buckets[cat]))
-    # případné další kategorie za tím
     for cat, lst in buckets.items():
         if cat not in order:
             sorted_buckets.append((cat, lst))
@@ -181,15 +251,22 @@ def build_pdf(filename, items):
     crit = sum(1 for i in items if i["is_critical"])
     intl = sum(1 for i in items if i["is_international"])
 
-    intro = (
-        f"Insgesamt {total} Artikel im Auswertungszeitraum. "
-        f"{crit} davon als kritisch eingestuft, "
-        f"{intl} virale / internationale Erwähnungen."
-    )
+    if total == 0:
+        intro = "Für den aktuellen Auswertungszeitraum wurden keine relevanten Erwähnungen gefunden."
+    else:
+        intro = (
+            f"Insgesamt {total} Artikel im Auswertungszeitraum. "
+            f"{crit} davon als kritisch eingestuft, "
+            f"{intl} virale / internationale Erwähnungen."
+        )
     story.append(Paragraph(intro, styles["Normal"]))
     story.append(Spacer(1, 12))
 
-    # Skupiny dle kategorií
+    if total == 0:
+        doc.build(story)
+        return
+
+    # Skupiny dle kategorií, v rámci seřazené podle score
     for cat, lst in bucket_by_category(items):
         story.append(Paragraph(cat, styles["Heading1"]))
         story.append(Spacer(1, 6))
@@ -215,7 +292,7 @@ def build_pdf(filename, items):
             meta_line = " · ".join(meta_parts)
             story.append(Paragraph(meta_line, styles["Normal"]))
 
-            # Krátký klikací odkaz – jen hlavní URL, ne celé RSS
+            # Krátký klikací odkaz – jen hlavní URL
             link_html = f'<a href="{it["url"]}">Link</a>'
             story.append(Paragraph(link_html, styles["Normal"]))
 
@@ -234,15 +311,21 @@ def build_email_html(items):
     international_count = sum(1 for x in items if x["is_international"])
 
     theme_counts = Counter(x["category"] for x in items)
-    themes_str = ", ".join(f"{k} ({v})" for k, v in theme_counts.items())
+    themes_str = ", ".join(f"{k} ({v})" for k, v in theme_counts.items()) if theme_counts else "–"
 
     # --- Executive Summary ---
-    executive_summary_html = f"""
-    Heute wurden insgesamt <b>{total}</b> relevante Erwähnungen zu Kaufland erfasst.<br>
-    Davon sind <b>{critical_count}</b> als potentiell kritisch (Rückruf, Qualität, Gesundheitsrisiken) eingestuft.<br>
-    Zusätzlich gibt es <b>{international_count}</b> virale / internationale Erwähnungen.<br><br>
-    Thematisch dominieren heute: <b>{escape(themes_str)}</b>.
-    """.strip()
+    if total == 0:
+        executive_summary_html = """
+        Für den aktuellen Auswertungszeitraum wurden keine relevanten Erwähnungen zu Kaufland gefunden.
+        Monitoring läuft, kritische Themen würden weiterhin per Alert markiert.
+        """.strip()
+    else:
+        executive_summary_html = f"""
+        Heute wurden insgesamt <b>{total}</b> relevante Erwähnungen zu Kaufland erfasst.<br>
+        Davon sind <b>{critical_count}</b> als potentiell kritisch (Rückruf, Qualität, Arbeitsbedingungen, Datenthemen) eingestuft.<br>
+        Zusätzlich gibt es <b>{international_count}</b> virale / internationale Erwähnungen.<br><br>
+        Thematisch dominieren heute: <b>{escape(themes_str)}</b>.
+        """.strip()
 
     # --- Top Headlines ---
     top_n = min(MAX_TOP, len(items))
@@ -271,10 +354,12 @@ def build_email_html(items):
         )
         top_lines.append(line)
 
-    top_block_html = "\n".join(top_lines)
+    top_block_html = "\n".join(top_lines) if top_lines else "<p>Keine Top-Schlagzeilen für den heutigen Zeitraum.</p>"
 
     # --- International / Viral Section ---
-    intl_items = [x for x in items if x["is_international"]]
+    top_urls = {it["url"] for it in top_items}
+    intl_items = [x for x in items if x["is_international"] and x["url"] not in top_urls]
+
     intl_lines = []
     for it in intl_items[:5]:
         meta_parts = [escape(it["source"])]
@@ -299,27 +384,43 @@ def build_email_html(items):
         international_block_html = ""
 
     # --- Načteme HTML šablonu a nahradíme placeholdery ---
-    with open("email_template.html", "r", encoding="utf-8") as f:
-        template_str = f.read()
+    try:
+        with open("email_template.html", "r", encoding="utf-8") as f:
+            template_str = f.read()
+        use_template = True
+    except FileNotFoundError:
+        template_str = None
+        use_template = False
 
-    replacements = {
-        "{date_str}": date_str,
-        "{tz}": TIMEZONE,
-        "{total_count}": str(total),
-        "{critical_count}": str(critical_count),
-        "{international_count}": str(international_count),
-        "{themes_str}": themes_str,
-        "{executive_summary_html}": executive_summary_html,
-        "{top_headlines_html}": top_block_html,
-        "{international_block_html}": international_block_html,
-        "{top_count}": str(top_n),
-    }
+    if use_template:
+        replacements = {
+            "{date_str}": date_str,
+            "{tz}": TIMEZONE,
+            "{total_count}": str(total),
+            "{critical_count}": str(critical_count),
+            "{international_count}": str(international_count),
+            "{themes_str}": themes_str,
+            "{executive_summary_html}": executive_summary_html,
+            "{top_headlines_html}": top_block_html,
+            "{international_block_html}": international_block_html,
+            "{top_count}": str(top_n),
+        }
 
-    html = template_str
-    for key, val in replacements.items():
-        html = html.replace(key, val)
-
-    return html
+        html = template_str
+        for key, val in replacements.items():
+            html = html.replace(key, val)
+        return html
+    else:
+        # Fallback: jednoduchý HTML mail, pokud šablona chybí
+        parts = [
+            f"<h1>Kaufland Media & Review Briefing – {date_str}</h1>",
+            f"<p>{executive_summary_html}</p>",
+            "<h2>Top Schlagzeilen</h2>",
+            top_block_html,
+        ]
+        if international_block_html:
+            parts.append(international_block_html)
+        return "\n".join(parts)
 
 
 # ================== RESEND ==================
@@ -387,12 +488,7 @@ def send_via_resend(subject, html, pdf_name):
 
 def main():
     items = fetch_news()
-    print(f"Fetched {len(items)} items from Google News.")
-
-    # I když nic nenajdeme, chceme poslat "prázdný" report,
-    # aby bylo jasné, že monitoring běžel.
-    if not items:
-        print("No items found for today – sending empty report.")
+    print(f"Fetched {len(items)} items from FEEDS (Google News + local).")
 
     pdf_name = f"DE_monitoring_privat_{datetime.now().strftime('%Y-%m-%d')}.pdf"
     build_pdf(pdf_name, items)
