@@ -3,6 +3,7 @@ import json
 import base64
 from datetime import datetime
 from html import escape
+from collections import Counter
 
 import feedparser
 from bs4 import BeautifulSoup
@@ -13,6 +14,7 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import mm
 
 from helpers import date_de, classify
+
 
 # ================== KONFIGURACE ==================
 
@@ -32,19 +34,20 @@ FEEDS = [
     "https://news.google.com/rss/search?q=Kaufland+Skandal+OR+R%C3%BCckruf+OR+Boykott&hl=de&gl=DE&ceid=DE:de",
 ]
 
+
 # ================== POMOCNÉ FUNKCE ==================
 
 
-def classify_article(title, summary, link):
+def classify_article(title: str, summary: str, link: str):
     """
     Navazuje na helpers.classify – počítáme s tím, že může vracet 3 nebo 4 hodnoty.
-    My si vezmeme prvni 3 + zbytek ignorujeme.
+    My si vezmeme první 3 + zbytek ignorujeme.
     """
     host, src_type, base_score, *rest = classify(link, title)
 
     text = f"{title} {summary}".lower()
 
-    # Kritické = hodně “tvrdé” výrazy (abychom neoznačovali jen "po skandálu znovu otevřeno")
+    # Kritické – velmi úzké, aby se tam nedostala každá "po skandálu opět otevřeno"
     crit_keywords = [
         "rückruf",
         "nicht essen",
@@ -53,17 +56,35 @@ def classify_article(title, summary, link):
         "lebensgefährlich",
         "vergiftung",
         "salmonell",
+        "warnung",
+        "gesundheitsschädlich",
     ]
     is_critical = any(kw in text for kw in crit_keywords)
 
-    # Tematická kategorie
+    # Tematická kategorie – jednoduchá, ale srozumitelná
     category = "Sonstiges"
-    if "rückruf" in text or "qualität" in text:
+    if "rückruf" in text or "qualität" in text or "mangel" in text:
         category = "Qualität & Rückruf"
-    elif "hygiene" in text or "hygieneskandal" in text or "filiale" in text or "markt" in text:
+    elif any(
+        kw in text
+        for kw in [
+            "hygiene",
+            "hygieneskandal",
+            "filiale",
+            "markt",
+            "öffnung",
+            "eröffnung",
+            "umbau",
+            "modernisiert",
+        ]
+    ):
         category = "Hygiene & Filialbetrieb"
+    elif any(
+        kw in text for kw in ["preise", "inflation", "rabatt", "angebot", "prospekt"]
+    ):
+        category = "Preis & Angebot"
 
-    # Mezinárodní / virální – jednoduché pravidlo podle domény
+    # Mezinárodní / virální – velmi hrubě podle domény
     is_international = not host.endswith(".de")
 
     return host, src_type, base_score, {
@@ -92,19 +113,21 @@ def fetch_news():
             if len(desc) > 260:
                 desc = desc[:260] + "…"
 
+            pub = getattr(e, "published", "")
             host, src_type, base_score, meta = classify_article(title, desc, link)
 
             items.append(
                 {
                     "title": title,
-                    "url": link,
                     "summary": desc,
+                    "url": link,
                     "source": host,
                     "src_type": src_type,
                     "score": base_score,
                     "category": meta["category"],
-                    "critical": meta["critical"],
-                    "international": meta["international"],
+                    "is_critical": meta["critical"],
+                    "is_international": meta["international"],
+                    "date": pub,
                 }
             )
 
@@ -116,17 +139,17 @@ def fetch_news():
 def bucket_by_category(items):
     buckets = {}
     for it in items:
-        buckets.setdefault(it["category"], []).append(it)
+        cat = it.get("category", "Sonstiges")
+        buckets.setdefault(cat, []).append(it)
 
-    order = ["Qualität & Rückruf", "Hygiene & Filialbetrieb", "Sonstiges"]
+    # Preferovaný pořadník kategorií
+    order = ["Qualität & Rückruf", "Hygiene & Filialbetrieb", "Preis & Angebot", "Sonstiges"]
     sorted_buckets = []
 
-    # nejdřív náš preferovaný pořadník
     for cat in order:
         if cat in buckets:
             sorted_buckets.append((cat, buckets[cat]))
-
-    # pak případné zbylé kategorie
+    # případné další kategorie za tím
     for cat, lst in buckets.items():
         if cat not in order:
             sorted_buckets.append((cat, lst))
@@ -155,8 +178,8 @@ def build_pdf(filename, items):
     story.append(Spacer(1, 8))
 
     total = len(items)
-    crit = sum(1 for i in items if i["critical"])
-    intl = sum(1 for i in items if i["international"])
+    crit = sum(1 for i in items if i["is_critical"])
+    intl = sum(1 for i in items if i["is_international"])
 
     intro = (
         f"Insgesamt {total} Artikel im Auswertungszeitraum. "
@@ -172,26 +195,30 @@ def build_pdf(filename, items):
         story.append(Spacer(1, 6))
 
         for it in lst:
-            # Řádek s titulkem
-            line_title = f"{escape(it['title'])} - {escape(it['source'])}"
+            # Titulek
+            line_title = f"{escape(it['title'])}"
+            story.append(Paragraph(line_title, styles["Heading3"]))
 
+            # Meta + štítky
             badges = []
-            if it["critical"]:
+            if it["is_critical"]:
                 badges.append("■ Kritisch")
-            if it["international"]:
+            if it["is_international"]:
                 badges.append("● Virale / internationale Erwähnung")
 
+            meta_parts = [escape(it["source"])]
+            if it.get("date"):
+                meta_parts.append(escape(it["date"]))
             if badges:
-                meta_line = f"{escape(it['source'])} · " + " · ".join(badges)
-            else:
-                meta_line = escape(it["source"])
+                meta_parts.append(" / ".join(badges))
 
-            link_html = f'<a href="{it["url"]}">Link</a>'
-
-            story.append(Paragraph(line_title, styles["Heading4"]))
+            meta_line = " · ".join(meta_parts)
             story.append(Paragraph(meta_line, styles["Normal"]))
-            # krátký, ale klikací odkaz
+
+            # Krátký klikací odkaz – jen hlavní URL, ne celé RSS
+            link_html = f'<a href="{it["url"]}">Link</a>'
             story.append(Paragraph(link_html, styles["Normal"]))
+
             story.append(Spacer(1, 6))
 
     doc.build(story)
@@ -203,43 +230,63 @@ def build_pdf(filename, items):
 def build_email_html(items):
     date_str = date_de(TIMEZONE)
     total = len(items)
-    crit = sum(1 for i in items if i["critical"])
-    intl = sum(1 for i in items if i["international"])
+    critical_count = sum(1 for x in items if x["is_critical"])
+    international_count = sum(1 for x in items if x["is_international"])
 
-    # Top N Schlagzeilen
-    top_items = items[: min(MAX_TOP, len(items))]
+    theme_counts = Counter(x["category"] for x in items)
+    themes_str = ", ".join(f"{k} ({v})" for k, v in theme_counts.items())
+
+    # --- Executive Summary ---
+    executive_summary_html = f"""
+    Heute wurden insgesamt <b>{total}</b> relevante Erwähnungen zu Kaufland erfasst.<br>
+    Davon sind <b>{critical_count}</b> als potentiell kritisch (Rückruf, Qualität, Gesundheitsrisiken) eingestuft.<br>
+    Zusätzlich gibt es <b>{international_count}</b> virale / internationale Erwähnungen.<br><br>
+    Thematisch dominieren heute: <b>{escape(themes_str)}</b>.
+    """.strip()
+
+    # --- Top Headlines ---
+    top_n = min(MAX_TOP, len(items))
+    top_items = sorted(items, key=lambda x: x["score"], reverse=True)[:top_n]
+
     top_lines = []
     for idx, it in enumerate(top_items, start=1):
         badges = []
-        if it["critical"]:
+        if it["is_critical"]:
             badges.append("⚠ Kritisch")
-        if it["international"]:
+        if it["is_international"]:
             badges.append("🌍 Virale Erwähnung")
         badge_str = " · ".join(badges)
+
+        meta_parts = [escape(it["source"])]
+        if it.get("date"):
+            meta_parts.append(escape(it["date"]))
+        if badge_str:
+            meta_parts.append(badge_str)
+        meta = " · ".join(meta_parts)
 
         line = (
             f'<p>{idx}. '
             f'<a href="{it["url"]}">{escape(it["title"])}</a><br>'
-            f'<span style="font-size:12px;color:#555;">{escape(it["source"])}'
+            f'<span style="font-size:12px;color:#555;">{meta}</span></p>'
         )
-        if badge_str:
-            line += " · " + escape(badge_str)
-        line += "</span></p>"
-
         top_lines.append(line)
 
     top_block_html = "\n".join(top_lines)
 
-    # Tematický přehled
-    cats = bucket_by_category(items)
-    themes_str = ", ".join(f"{cat} ({len(lst)})" for cat, lst in cats)
-
-    # Mezinárodní blok (do mailu)
-    intl_items = [it for it in items if it["international"]]
+    # --- International / Viral Section ---
+    intl_items = [x for x in items if x["is_international"]]
     intl_lines = []
     for it in intl_items[:5]:
+        meta_parts = [escape(it["source"])]
+        if it.get("date"):
+            meta_parts.append(escape(it["date"]))
+        if it["is_critical"]:
+            meta_parts.append("⚠ Kritisch")
+        meta = " · ".join(meta_parts)
+
         intl_lines.append(
-            f'<li><a href="{it["url"]}">{escape(it["title"])}</a> – {escape(it["source"])}</li>'
+            f'<li><a href="{it["url"]}">{escape(it["title"])}</a>'
+            f'<br><span style="font-size:12px;color:#555;">{meta}</span></li>'
         )
 
     if intl_lines:
@@ -251,30 +298,21 @@ def build_email_html(items):
     else:
         international_block_html = ""
 
-      # Načteme tvou HTML šablonu a jen nahradíme placeholdery
+    # --- Načteme HTML šablonu a nahradíme placeholdery ---
     with open("email_template.html", "r", encoding="utf-8") as f:
         template_str = f.read()
-
-    # Předpokládám, že už máš někde:
-    # - executive_summary_html  (string s HTML odstavci)
-    # - top_block_html          (HTML <li>…</li> pro Top N)
-    # - top_items               (seznam top článků)
 
     replacements = {
         "{date_str}": date_str,
         "{tz}": TIMEZONE,
         "{total_count}": str(total),
-        "{critical_count}": str(crit),
-        "{international_count}": str(intl),
+        "{critical_count}": str(critical_count),
+        "{international_count}": str(international_count),
         "{themes_str}": themes_str,
-
-        # 👇 to už jsi měl
+        "{executive_summary_html}": executive_summary_html,
         "{top_headlines_html}": top_block_html,
         "{international_block_html}": international_block_html,
-
-        # 👇 NOVÉ klíče pro šablonu
-        "{executive_summary_html}": executive_summary_html,
-        "{top_count}": str(len(top_items)),
+        "{top_count}": str(top_n),
     }
 
     html = template_str
@@ -317,10 +355,11 @@ def send_via_resend(subject, html, pdf_name):
     if BCC:
         payload["bcc"] = [x.strip() for x in BCC.split(",") if x.strip()]
 
+    data_bytes = json.dumps(payload).encode("utf-8")
+
     import urllib.request
     import urllib.error
 
-    data_bytes = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         "https://api.resend.com/emails",
         data=data_bytes,
