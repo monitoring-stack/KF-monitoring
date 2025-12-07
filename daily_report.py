@@ -205,7 +205,7 @@ def fetch_news():
             raw_summary = getattr(e, "summary", "")
             desc = BeautifulSoup(raw_summary, "html.parser").get_text().strip()
 
-            host, typ, base_score = classify(link, title)
+            host, typ, base_score, *_ = classify(link, title)
 
             text_for_score = f"{title} {desc}".lower()
             score = base_score
